@@ -3,7 +3,16 @@ import numpy as np
 import numba
 
 def log_return(price_df: pd.DataFrame) -> pd.Series:
-    return np.log(price_df['close'] / price_df['close'].shift(1))
+    # 0 또는 음수 가격으로 인한 로그 오류를 방지하기 위해
+    # 가격의 하한을 매우 작은 양수로 고정
+    epsilon = 1e-9
+    close_prices = price_df['close'].clip(lower=epsilon)
+    
+    # .shift(1)은 첫 번째 행에 NaN을 생성하며, 이는 의도된 동작입니다.
+    prev_close_prices = close_prices.shift(1)
+    
+    # 이제 나눗셈과 로그 계산이 수학적으로 안정적입니다.
+    return np.log(close_prices / prev_close_prices)
 
 def compute_sma(price_df: pd.DataFrame, window: int) -> pd.Series:
     return price_df['close'].rolling(window=window).mean()
