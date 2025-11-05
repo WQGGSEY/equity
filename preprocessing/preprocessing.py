@@ -166,62 +166,6 @@ def compute_indicators_parallel(ticker_list: list[str]) -> int:
                 success_count += 1
     return success_count
 
-# --- [수정] 상관관계 분석 함수 (NxN Feature Condition Number) ---
-def test_correlation_analysis(indicators_ddf: dd.DataFrame, feature_cols: list[str]):
-    """Dask DataFrame 샘플링, 상관관계 히트맵, Feature Correlation Condition Number 계산"""
-    
-    available_features = [f for f in feature_cols if f in indicators_ddf.columns]
-    if not available_features:
-        print("[WARNING] 분석할 피처 목록 중 유효한 컬럼이 Dask DataFrame에 없습니다.")
-        return
-
-    try:
-        # Dask 샘플링
-        sample_df = indicators_ddf[available_features].dropna().sample(frac=0.05).compute() 
-        if sample_df.empty:
-             print("[WARNING] 샘플링된 데이터가 없습니다. (데이터가 부족하거나 모두 NaN일 수 있음)")
-             return
-    except Exception as sample_e:
-        print(f"[ERROR] Dask 샘플링 또는 계산 중 오류 발생: {sample_e}")
-        print(traceback.format_exc())
-        print("상관관계 분석을 건너뜁니다.")
-        return
-
-    # 1. 상관관계 히트맵 생성
-    corr_matrix = sample_df.corr()
-    plt.figure(figsize=(24, 20))
-    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap='coolwarm', vmin=-1, vmax=1, annot_kws={"size": 8})
-    plt.title("Feature Correlation Heatmap (Sampled)", fontsize=20)
-    plt.xticks(rotation=45, ha='right')
-    plt.yticks(rotation=0)
-    plt.tight_layout()
-    try:
-        plt.savefig(HEATMAP_PATH)
-    except Exception as e:
-        print(f"\n[실패] 히트맵 저장 중 오류 발생: {e}")
-
-    # 2. [수정] NxN Feature Correlation Matrix의 Condition Number 계산
-    print(f"\n--- Feature Matrix Condition Number ---")
-    try:
-        # 상관관계 행렬(R)의 조건수(Condition Number)를 계산
-        # $\kappa(R) = \frac{|\lambda_{\text{max}}|}{|\lambda_{\text{min}}|}$
-        cond_num = np.linalg.cond(corr_matrix)
-        
-        # 요청된 결과 출력
-        matrix_size = len(corr_matrix)
-        print(f"Condition Number of the {matrix_size}x{matrix_size} Correlation Matrix: {cond_num:<.4e}")
-        
-        if cond_num > 1000:
-            print(f"[WARNING] Condition Number is very high (> 1000). This indicates severe multicollinearity (strong correlation) between features.")
-        elif cond_num > 100:
-            print(f"[WARNING] Condition Number is high (> 100). This indicates potential multicollinearity.")
-        
-    except np.linalg.LinAlgError as lae:
-        # (예: 특이 행렬 - Singular matrix)
-        print(f"[ERROR] Condition Number 계산 실패 (특이 행렬 등): {lae}")
-    except Exception as e:
-        print(f"[ERROR] Condition Number 계산 중 알 수 없는 오류: {e}")
-    print(f"---------------------------------------")
 
 def main():
     start_time_main = time.time()
@@ -270,17 +214,6 @@ def main():
                 overwrite=True,
                 schema='infer'
             )
-
-            # --- 5. 상관관계 분석 (Dask DataFrame 사용) ---
-            features_to_analyze = [
-                'log_return', 'rsi_20', 'rsi_120', 'mfi_14',
-                'b_slope_20', 'b_uncert_20', 'b_slope_240', 'b_uncert_240',
-                'bb_width_20', 'bb_width_120',
-                'skewness_20', 'skewness_120', 'kurtosis_20', 'kurtosis_120',
-                'auto_corr_20', 'auto_corr_120', 'amihud_60'
-            ]
-            features_in_df = [f for f in features_to_analyze if f in ddf.columns]
-            test_correlation_analysis(ddf, features_in_df)
 
         except Exception as dask_e:
             print(f"\n[CRITICAL_ERROR] Dask 처리 또는 최종 저장 중 오류 발생: {dask_e}")
