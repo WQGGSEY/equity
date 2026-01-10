@@ -29,15 +29,13 @@ def calculate_correlation_optimized(meta_a, meta_b, window=120):
     p1, p2 = meta_a['last_price'], meta_b['last_price']
     if p1 == 0 or p2 == 0: return 0.0
     
-    # [Anomaly 대응 1] Penny Stock Filter
-    # 둘 다 동전주라면 Stitching 가치가 없음 (병목 방지 핵심)
+    # [Anomaly 대응] Penny Stock Skip
+    # 둘 다 동전주면 병합 가치 없음 (병목 방지)
     if p1 < PENNY_STOCK_THRESHOLD and p2 < PENNY_STOCK_THRESHOLD: return 0.0
     
-    # [수정됨] Price Filter 제거!
-    # 이유: 액면분할로 인해 가격 차이가 10배(1000%) 나더라도, 
-    # 상관계수는 1.0이 나올 수 있으므로 여기서 쳐내면 안 됨.
-    # Stitching 단계에서 'Ratio Adjusting'이 이를 해결함.
-    # if abs(p1 - p2) / max(p1, p2) > 0.5: return 0.0  <-- 삭제
+    # ❌ [삭제됨] 가격 차이 50% 필터 제거 
+    # 이유: 액면분할(10배 차이 등) 종목도 잡아내야 함.
+    # if abs(p1 - p2) / max(p1, p2) > 0.5: return 0.0 
 
     # Window Slicing Correlation
     try:
@@ -62,7 +60,7 @@ def stitch_and_save(main_meta, sub_metas, output_dir):
         for sub in sub_metas:
             sub_df = pd.read_parquet(sub['path'])
             
-            # [Anomaly 대응 2] Ratio Adjusting (단층 제거)
+            # [Anomaly 대응] Ratio Adjusting (단층 제거)
             common = main_df.index.intersection(sub_df.index)
             if not common.empty:
                 pivot = common[-1]
@@ -70,7 +68,7 @@ def stitch_and_save(main_meta, sub_metas, output_dir):
                 p_sub = float(sub_df.loc[pivot, 'Close'])
                 if p_sub != 0:
                     ratio = p_main / p_sub
-                    # 1% 이상 차이나면(액면분할 등) 과거 데이터 보정
+                    # 1% 이상 차이나면 보정 (액면분할 대응)
                     if abs(1.0 - ratio) > 0.01:
                         cols = [c for c in ['Open','High','Low','Close','Adj Close'] if c in sub_df.columns]
                         sub_df[cols] *= ratio
@@ -81,9 +79,9 @@ def stitch_and_save(main_meta, sub_metas, output_dir):
         main_df = main_df[~main_df.index.duplicated(keep='last')]
         main_df.sort_index(inplace=True)
 
-        # Gatekeeper
         cols = [c for c in ['Open','High','Low','Close'] if c in main_df.columns]
         if (main_df[cols] < 0).any().any(): return False
+
         pct = main_df['Close'].pct_change().dropna()
         if ((pct > 3.0) | (pct < -0.9)).any(): return False
 
@@ -93,7 +91,7 @@ def stitch_and_save(main_meta, sub_metas, output_dir):
     except: return False
 
 def process_gold():
-    print(">>> [Phase 5] Gold Processor (Split-Ready & Optimized)")
+    print(">>> [Phase 5] Gold Processor (Final Logic Sync)")
     
     if GOLD_DIR.exists(): shutil.rmtree(GOLD_DIR)
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,7 +112,7 @@ def process_gold():
         candidates = buckets[key]
         n_total = len(candidates)
         
-        # [Anomaly 대응 3] Smart Safety Cap (무한루프 방지)
+        # [Anomaly 대응] Smart Safety Cap
         if n_total > MAX_BUCKET_SIZE:
             candidates.sort(key=lambda x: (x['last_price'] >= PENNY_STOCK_THRESHOLD, x['end_date'], x['count']), reverse=True)
             vips = candidates[:MAX_BUCKET_SIZE]
@@ -148,7 +146,7 @@ def process_gold():
                 sub = candidates[j]
                 if sub['ticker'] in processed: continue
                 
-                # 상관계수 계산 (이제 가격 차이가 커도 실행됨)
+                # 가격 차이 필터가 제거되어 상관계수 계산으로 진입함
                 if calculate_correlation_optimized(main, sub) > 0.99:
                     duplicates.append(sub)
                     processed.add(sub['ticker'])
