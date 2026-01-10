@@ -32,25 +32,16 @@ PLATINUM_DIR = DATA_DIR / "platinum"
 PLATINUM_FEATURES_DIR = PLATINUM_DIR / "features"       # Ticker 기준 저장소
 PLATINUM_UNIVERSE_DIR = PLATINUM_DIR / "daily_universe" # Date 기준 저장소
 
+# src/config.py 예시
+
 ACTIVE_FEATURES = [
     {
-        'class': 'TradeValue', 
-        'module': 'src.features.technical', # 위치
-        'params': {}
+        'class': 'DollarBarStationaryFeature',
+        'module': 'src.features.preprocessors',
+        'params': {
+            'threshold': 50_000,  # 1억원 단위 (종목 유동성에 따라 조절 필요)
+            'd': 0.4,                  # 차분 차수
+        }
     },
-    {
-        'class': 'DailyReturn', 
-        'module': 'src.features.technical',
-        'params': {}
-    },
-    {
-        'class': 'MovingAverage', 
-        'module': 'src.features.technical',
-        'params': {'window': 5}
-    },
-    {
-        'class': 'MovingAverage', 
-        'module': 'src.features.technical',
-        'params': {'window': 20} # 파라미터만 바꿔서 여러 개 생성 가능
-    },
+    # 추후 다른 피처들(PCA 등)도 여기에 추가
 ]

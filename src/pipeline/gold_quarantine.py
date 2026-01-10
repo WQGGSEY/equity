@@ -1,68 +1,81 @@
 import pandas as pd
 import shutil
 from pathlib import Path
-from src.config import GOLD_DIR, MASTER_PATH
+from tqdm import tqdm
+from ..config import GOLD_DIR, QUARANTINE_DIR
 
 def run_quarantine():
-    print(">>> [Pipeline 05] Gold Data 격리 조치 (Quarantine)")
+    """
+    [Gold Validator]
+    Gold 데이터의 무결성을 검증하고, 불량 데이터는 Quarantine 폴더로 격리합니다.
     
-    # 1. 감사 리포트 확인
-    # gold_auditor가 저장한 리포트 경로
-    report_path = GOLD_DIR.parent / "audit_report.csv"
+    [검증 기준]
+    1. 데이터가 비어있는가?
+    2. 필수 컬럼(OHLCV)이 존재하는가?
+    3. [NEW] 가격(OHLC)에 0.0 또는 음수가 포함되어 있는가? (Fatal Error)
+    4. 데이터의 길이가 너무 짧은가? (e.g., < 30 days)
+    """
+    print(">>> [Phase 5] Gold Data Quarantine (Validator)")
     
-    if not report_path.exists():
-        print("  ✅ 격리 대상 없음 (리포트 파일 미발견)")
-        return
-
-    try:
-        df_error = pd.read_csv(report_path)
-    except Exception:
-        print("  ⚠️ 리포트 파일 읽기 실패. 격리를 건너뜁니다.")
-        return
-        
-    if df_error.empty:
-        print("  ✅ 격리 대상 없음 (리포트 깨끗함)")
-        return
-
-    # 2. 격리 폴더 준비
-    quarantine_dir = GOLD_DIR.parent / "quarantine"
-    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    gold_files = list(GOLD_DIR.glob("*.parquet"))
     
-    print(f"  🗑️ 격리 대상: {len(df_error)} 개 종목")
-    print(f"  📂 이동 경로: {quarantine_dir}")
-
-    # 3. 장부 로드 (상태 업데이트용)
-    df_master = None
-    if MASTER_PATH.exists():
-        df_master = pd.read_csv(MASTER_PATH)
-
-    moved_cnt = 0
+    moved_count = 0
+    valid_count = 0
     
-    # 4. 파일 이동 및 장부 갱신
-    for ticker in df_error['ticker']:
-        src_path = GOLD_DIR / f"{ticker}.parquet"
-        dst_path = quarantine_dir / f"{ticker}.parquet"
-        
-        # 파일이 실제로 존재하면 이동
-        if src_path.exists():
+    for f in tqdm(gold_files, desc="Inspecting Gold Data"):
+        try:
+            is_valid = True
+            reason = ""
+            
+            # 1. 파일 읽기
             try:
-                shutil.move(str(src_path), str(dst_path))
-                moved_cnt += 1
-                
-                # 장부 업데이트: is_active -> False
-                if df_master is not None:
-                    mask = df_master['ticker'] == ticker
-                    df_master.loc[mask, 'is_active'] = False
-                    df_master.loc[mask, 'note'] = 'Quarantined: Integrity Fail'
+                df = pd.read_parquet(f)
             except Exception as e:
-                print(f"    ⚠️ 이동 실패 ({ticker}): {e}")
-    
-    # 5. 장부 저장
-    if df_master is not None and moved_cnt > 0:
-        df_master.to_csv(MASTER_PATH, index=False)
-        print("  📝 Master List 업데이트 완료 (격리 종목 비활성화)")
+                is_valid = False
+                reason = f"Read Error: {e}"
 
-    print(f"  ✅ 격리 조치 완료: {moved_cnt} 개 파일 이동됨.")
+            if is_valid:
+                # 2. 빈 데이터 확인
+                if df.empty:
+                    is_valid = False
+                    reason = "Empty DataFrame"
+                
+                # 3. 데이터 길이 확인 (너무 짧으면 ML 불가)
+                elif len(df) < 50:
+                    is_valid = False
+                    reason = f"Too Short (Rows={len(df)} < 50)"
+
+                # 4. [핵심] 0.0 또는 음수 가격 확인 (Logical Corruption)
+                else:
+                    price_cols = ['Open', 'High', 'Low', 'Close']
+                    # 존재하는 컬럼만 체크
+                    cols_to_check = [c for c in price_cols if c in df.columns]
+                    
+                    if cols_to_check:
+                        # (df <= 0) 조건이 하나라도 True면 불량
+                        if (df[cols_to_check] <= 0).any().any():
+                            is_valid = False
+                            # 0이 있는 컬럼과 개수 파악
+                            zeros = (df[cols_to_check] <= 0).sum()
+                            zeros = zeros[zeros > 0].to_dict()
+                            reason = f"Zero/Negative Prices Found: {zeros}"
+
+            # 5. 격리 조치
+            if not is_valid:
+                # Quarantine으로 이동
+                shutil.move(str(f), str(QUARANTINE_DIR / f.name))
+                # 로그 남기기 (선택 사항)
+                # print(f"🚫 Quarantine: {f.stem} -> {reason}")
+                moved_count += 1
+            else:
+                valid_count += 1
+                
+        except Exception as e:
+            print(f"❌ Error processing {f.name}: {e}")
+
+    print(f"  ✅ 검증 완료: 정상 {valid_count}개 / 격리 {moved_count}개")
+    print(f"  🗑️ 격리된 파일 위치: {QUARANTINE_DIR}")
 
 if __name__ == "__main__":
     run_quarantine()

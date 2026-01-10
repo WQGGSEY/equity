@@ -21,7 +21,8 @@ try:
         silver_transformer as silver,  # Step 4: NAN 처리 및 표준화
         gold_processor as gold,        # Step 5: 병합 및 로직 처리
         gold_auditor as gold_audit,    # Step 6: 검사
-        gold_quarantine as quarantine  # Step 6: 격리
+        gold_quarantine as quarantine,  # Step 6: 격리
+        platinum_processor as platinum # Step 7: feature 생성
     )
 except ImportError as e:
     print(f"❌ [Critical] 모듈 임포트 실패: {e}")
@@ -109,6 +110,14 @@ def main():
     print("=" * 60)
     print(f" ✅ All Completed in {elapsed:.2f} sec")
     print("=" * 60)
+
+    # ---------------------------------------------------------
+    # Step 7: feature 생성
+    # ---------------------------------------------------------
+    try:
+        platinum.process_features()
+    except Exception as e:
+        print(f"❌ Feature 생성 실패: {e}")
 
 if __name__ == "__main__":
     main()
