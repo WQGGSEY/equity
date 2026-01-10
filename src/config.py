@@ -62,7 +62,7 @@ ACTIVE_FEATURES = [
         'class': 'Contrastive_OC_HL',
         'module': 'src.features.contrastive', 
         'params': {
-           'model_path': str(MODEL_WEIGHTS_DIR / "ts2vec_body_wick_v1.pth")
+           'model_path': str(MODEL_WEIGHTS_DIR / "ts2vec_learnable_tau.pth")
         }
     },
 ]
