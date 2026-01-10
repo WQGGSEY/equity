@@ -27,3 +27,30 @@ USE_THREADS = False
 # 4. Gold Processor 최적화 파라미터 (필수 확인!)
 PENNY_STOCK_THRESHOLD = 1.0   # 1달러 미만 동전주는 병합 주체 제외
 MAX_BUCKET_SIZE = 300         # 버킷 당 최대 정밀 비교 개수
+
+PLATINUM_DIR = DATA_DIR / "platinum"
+PLATINUM_FEATURES_DIR = PLATINUM_DIR / "features"       # Ticker 기준 저장소
+PLATINUM_UNIVERSE_DIR = PLATINUM_DIR / "daily_universe" # Date 기준 저장소
+
+ACTIVE_FEATURES = [
+    {
+        'class': 'TradeValue', 
+        'module': 'src.features.technical', # 위치
+        'params': {}
+    },
+    {
+        'class': 'DailyReturn', 
+        'module': 'src.features.technical',
+        'params': {}
+    },
+    {
+        'class': 'MovingAverage', 
+        'module': 'src.features.technical',
+        'params': {'window': 5}
+    },
+    {
+        'class': 'MovingAverage', 
+        'module': 'src.features.technical',
+        'params': {'window': 20} # 파라미터만 바꿔서 여러 개 생성 가능
+    },
+]
