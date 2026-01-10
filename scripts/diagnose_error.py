@@ -28,7 +28,7 @@ def inspect_platinum_data():
 
     # 2. 샘플 파일 로드 (첫 번째 파일 또는 랜덤 선택)
     # 특정 종목을 확인하고 싶다면 아래 코드를 수정하세요 (예: target_ticker = '005930')
-    target_file = files[3753] 
+    target_file = files[0] 
     # target_file = random.choice(files) # 랜덤 확인 시 주석 해제
 
     print(f"\n========================================================")
@@ -37,6 +37,7 @@ def inspect_platinum_data():
 
     try:
         df = pd.read_parquet(target_file)
+        
         
         # 3. 기본 정보 출력
         print(f"\n[1] 데이터 Shape (행, 열): {df.shape}")
@@ -66,13 +67,9 @@ def inspect_platinum_data():
             print("   ⚠️ 상장 초기 데이터 부재 혹은 지표 계산 Window로 인한 NaN일 수 있음.")
 
         # 7. 통계 요약 (Feature들의 값 범위 확인)
-        print(f"\n[6] 기술 통계 (Describe) - 일부 컬럼:")
-        # 너무 많으면 보기 힘드므로 새로 생성된 FD_ 컬럼 위주로 확인
-        fd_cols = [c for c in df.columns if c.startswith('FD_') or 'PCA' in c]
-        if fd_cols:
-            print(df[fd_cols].describe())
-        else:
-            print(df.describe())
+        print(f"\n[6] 기술 통계 (Describe):")
+
+        print(df.describe())
 
     except Exception as e:
         print(f"❌ 파일 로드 중 에러 발생: {e}")
