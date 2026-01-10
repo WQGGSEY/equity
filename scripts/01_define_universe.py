@@ -7,7 +7,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 # ==========================================
-# [Phase 1] Universe Definition + Physical Audit (All-in-One)
+# [Phase 1] Universe Definition + Auto Conflict Resolution
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parent.parent
 MASTER_PATH = BASE_DIR / "data" / "bronze" / "master_ticker_list.csv"
@@ -15,7 +15,7 @@ BACKUP_PATH = BASE_DIR / "data" / "bronze" / "master_ticker_list_backup.csv"
 
 # 저장소 위치 정의
 YAHOO_DIR = BASE_DIR / "data" / "bronze" / "yahoo_price_data"
-KAGGLE_DIR = BASE_DIR / "data" / "bronze" / "daily_prices"
+KAGGLE_DIR = BASE_DIR / "data" / "bronze" / "daily_prices" # Kaggle legacy
 
 # SEC 및 NASDAQ 소스
 SEC_HEADERS = {'User-Agent': 'Individual_Researcher my_email@example.com'}
@@ -44,128 +44,158 @@ def get_new_tickers_from_web():
         
     return found_tickers
 
-def check_physical_file(ticker):
+def scan_and_resolve_conflicts():
     """
-    해당 티커의 파일이 실제로 존재하는지 확인하고 메타데이터 반환
+    [핵심 로직] 하드디스크를 스캔하여 Yahoo와 Kaggle의 충돌을 자동 해결
     """
-    # 1. Yahoo 폴더 확인 (우선순위)
-    y_ticker = normalize_ticker(ticker)
-    y_path = YAHOO_DIR / f"ticker={y_ticker}" / "price.parquet"
+    inventory = {} # { 'TICKER': {Info} }
     
-    if y_path.exists():
-        return y_path, "yahoo"
+    # 1. Yahoo 폴더 스캔 (우선순위 1위 - 정본)
+    # Yahoo에 있는 건 무조건 그 이름 그대로 가져감 (예: GM -> GM)
+    if YAHOO_DIR.exists():
+        for p in tqdm(list(YAHOO_DIR.glob("ticker=*")), desc="Scanning Yahoo (High Priority)"):
+            if not p.is_dir(): continue
+            ticker = p.name.split("=")[-1]
+            ticker = normalize_ticker(ticker)
+            
+            file_path = p / "price.parquet"
+            if file_path.exists():
+                inventory[ticker] = {
+                    'source': 'yahoo',
+                    'file_path': str(file_path.relative_to(BASE_DIR)),
+                    'is_active': True
+                }
 
-    # 2. Kaggle 폴더 확인 (Legacy 포함)
-    # Kaggle은 원본 티커명을 그대로 폴더명으로 씀
-    k_path = KAGGLE_DIR / f"ticker={ticker}" / "price.parquet"
-    if k_path.exists():
-        return k_path, "kaggle"
-        
-    return None, None
+    # 2. Kaggle 폴더 스캔 (우선순위 2위 - 충돌 시 이름 변경)
+    if KAGGLE_DIR.exists():
+        for p in tqdm(list(KAGGLE_DIR.glob("ticker=*")), desc="Scanning Kaggle (Legacy Check)"):
+            if not p.is_dir(): continue
+            original_ticker = p.name.split("=")[-1]
+            original_ticker = normalize_ticker(original_ticker)
+            
+            file_path = p / "price.parquet"
+            if not file_path.exists(): continue
+
+            # [자동 충돌 해결]
+            if original_ticker in inventory:
+                # 이미 Yahoo에서 등록된 티커라면? -> "_OLD"를 붙여서 별도 등록
+                # 예: Yahoo(GM)이 있으므로, Kaggle(GM) -> GM_OLD로 장부 등록
+                new_ticker_name = f"{original_ticker}_OLD"
+                
+                # 로그가 너무 많으면 주석 처리 하세요
+                # print(f"  ⚡️ 충돌 감지: {original_ticker} -> {new_ticker_name} (자동 변경)")
+                
+                inventory[new_ticker_name] = {
+                    'source': 'kaggle_legacy',
+                    'file_path': str(file_path.relative_to(BASE_DIR)),
+                    'is_active': True # 데이터 살림
+                }
+            else:
+                # Yahoo에는 없는 경우 (상폐주 등) -> 원래 이름 그대로 등록
+                inventory[original_ticker] = {
+                    'source': 'kaggle',
+                    'file_path': str(file_path.relative_to(BASE_DIR)),
+                    'is_active': True
+                }
+                
+    return inventory
 
 def main():
-    print(">>> [Phase 1] 리스트 정의 및 파일 전수 조사 (통합본)")
+    print(">>> [Phase 1] Universe 정의 및 자동 충돌 해결 (Auto-Resolve)")
     
-    # 1. 기존 파일 로드
-    if not MASTER_PATH.exists():
-        print("❌ 기존 리스트가 없습니다. (최초 생성 모드로 진행)")
-        df = pd.DataFrame(columns=['ticker', 'source', 'is_active', 'count', 'file_path', 'start_date', 'end_date', 'last_updated'])
-        existing_tickers = set()
-        original_cols = df.columns.tolist()
-    else:
-        print(f"  📖 장부 로드: {MASTER_PATH.name}")
-        shutil.copy2(MASTER_PATH, BACKUP_PATH) # 백업
-        df = pd.read_csv(MASTER_PATH)
-        existing_tickers = set(df['ticker'].apply(normalize_ticker).tolist())
-        original_cols = df.columns.tolist()
+    # 1. 파일 시스템 스캔 (자동 매핑 수행)
+    print("  🕵️ 로컬 파일 전수 조사 중...")
+    local_data = scan_and_resolve_conflicts()
+    print(f"  ✅ 로컬 파일 스캔 완료: {len(local_data)} 개 종목 식별됨")
 
-    # 2. 신규 종목 추가 (Web)
+    # 2. 기존 장부 메타데이터 백업 (count, date 등 유지용)
+    old_meta = {}
+    if MASTER_PATH.exists():
+        shutil.copy2(MASTER_PATH, BACKUP_PATH)
+        df_old = pd.read_csv(MASTER_PATH)
+        for _, row in df_old.iterrows():
+            old_meta[row['ticker']] = row.to_dict()
+
+    # 3. 최종 리스트 병합
+    final_rows = []
+    
+    # [A] 로컬 파일 등록
+    for ticker, info in local_data.items():
+        row = {
+            'ticker': ticker,
+            'source': info['source'],
+            'is_active': info['is_active'],
+            'file_path': info['file_path'],
+            'count': 0, 
+            'start_date': None, 
+            'end_date': None,
+            'last_updated': datetime.now().strftime("%Y-%m-%d")
+        }
+        
+        # 기존 메타데이터 복구 (파일 경로가 같을 때만)
+        if ticker in old_meta:
+            prev = old_meta[ticker]
+            if str(prev.get('file_path')) == str(info['file_path']):
+                row['count'] = prev.get('count', 0)
+                row['start_date'] = prev.get('start_date')
+                row['end_date'] = prev.get('end_date')
+        
+        final_rows.append(row)
+
+    # [B] 웹 신규 종목 추가 (로컬에 없는 것만)
     web_tickers = get_new_tickers_from_web()
-    new_candidates = sorted(list(web_tickers - existing_tickers))
-    new_candidates = [t for t in new_candidates if "$" not in t]
+    existing_keys = set(local_data.keys())
     
-    if new_candidates:
-        print(f"  🔍 신규 종목 추가: {len(new_candidates)} 개")
-        new_rows = []
-        today = datetime.now().strftime("%Y-%m-%d")
-        for t in new_candidates:
-            row = {col: None for col in original_cols}
-            row['ticker'] = t
-            row['source'] = 'new_ipo' # 일단 표시
-            row['is_active'] = True
-            row['count'] = 0
-            # 예상 경로 (실제 파일 확인 전 임시)
-            row['file_path'] = f"data/bronze/yahoo_price_data/ticker={t}/price.parquet"
-            row['last_updated'] = today
-            new_rows.append(row)
-        
-        df_new = pd.DataFrame(new_rows)
-        # 컬럼 매칭
-        for col in original_cols:
-            if col not in df_new.columns: df_new[col] = None
-            
-        df = pd.concat([df, df_new[original_cols]], ignore_index=True)
-    else:
-        print("  ✅ 신규 추가될 종목이 없습니다.")
+    new_candidates = []
+    for t in web_tickers:
+        # GM이 있든 GM_OLD가 있든 하나라도 있으면 신규 아님
+        if t not in existing_keys and f"{t}_OLD" not in existing_keys:
+             new_candidates.append(t)
+    
+    print(f"  🔍 웹 신규 종목 추가: {len(new_candidates)} 개")
+    
+    for t in new_candidates:
+        if "$" in t: continue 
+        row = {
+            'ticker': t,
+            'source': 'new_ipo',
+            'is_active': True,
+            'file_path': f"data/bronze/yahoo_price_data/ticker={t}/price.parquet",
+            'count': 0,
+            'start_date': None,
+            'end_date': None,
+            'last_updated': datetime.now().strftime("%Y-%m-%d")
+        }
+        final_rows.append(row)
 
-    # =========================================================
-    # [핵심] 리스트에 있는 모든 종목에 대해 "파일이 진짜 있는지" 확인
-    # =========================================================
-    print(f"  🕵️ 전체 종목 실물 전수 조사 (Audit)... 총 {len(df)}개")
+    # 4. 저장 및 메타데이터 갱신
+    df_final = pd.DataFrame(final_rows)
     
-    audit_updated = 0
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # tqdm으로 진행 상황 표시
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Auditing"):
-        ticker = row['ticker']
-        
-        # 파일 찾기
-        found_path, source_type = check_physical_file(ticker)
-        
-        if found_path:
-            # [파일 있음] -> 장부 업데이트
-            try:
-                # 헤더만 읽어서 정보 갱신
-                meta = pd.read_parquet(found_path, columns=['Close'])
-                
-                df.at[idx, 'count'] = len(meta)
-                df.at[idx, 'start_date'] = meta.index[0].strftime("%Y-%m-%d")
-                df.at[idx, 'end_date'] = meta.index[-1].strftime("%Y-%m-%d")
-                df.at[idx, 'file_path'] = str(found_path.relative_to(BASE_DIR))
-                df.at[idx, 'last_updated'] = today_str
-                
-                # source 정보가 없거나 new_ipo라면 실제 소스로 변경
-                if pd.isna(row.get('source')) or row.get('source') == 'new_ipo':
-                    df.at[idx, 'source'] = source_type
-                
-                audit_updated += 1
-            except:
-                # 파일 깨짐 -> 없음 처리
-                df.at[idx, 'count'] = 0
-        else:
-            # [파일 없음] -> 0 처리 (Phase 2 다운로드 대상)
-            df.at[idx, 'count'] = 0
-            
-            # 경로가 비어있으면 예상 경로라도 채워둠
-            if pd.isna(row.get('file_path')):
-                df.at[idx, 'file_path'] = f"data/bronze/yahoo_price_data/ticker={normalize_ticker(ticker)}/price.parquet"
+    print("  📝 메타데이터(행 개수 등) 갱신 중...")
+    # 속도를 위해 count가 0인 것만 실제 파일 열어서 확인
+    updates = 0
+    for idx, row in tqdm(df_final.iterrows(), total=len(df_final)):
+        if row['source'] != 'new_ipo' and (pd.isna(row['count']) or row['count'] == 0):
+            full_path = BASE_DIR / str(row['file_path'])
+            if full_path.exists():
+                try:
+                    # 헤더만 읽어서 빠르게 처리
+                    meta = pd.read_parquet(full_path, columns=['Close'])
+                    df_final.at[idx, 'count'] = len(meta)
+                    df_final.at[idx, 'start_date'] = meta.index[0].strftime("%Y-%m-%d")
+                    df_final.at[idx, 'end_date'] = meta.index[-1].strftime("%Y-%m-%d")
+                    updates += 1
+                except:
+                    pass
 
-    # 4. 저장
-    df.to_csv(MASTER_PATH, index=False)
-    
-    # 결과 요약
-    need_download = len(df[df['count'] == 0])
-    has_data = len(df[df['count'] > 0])
+    df_final.to_csv(MASTER_PATH, index=False)
     
     print("\n" + "="*40)
-    print("  ✅ Phase 1 (정의 + 감사) 완료")
+    print("  ✅ 장부 생성 완료")
+    print(f"  - 총 종목: {len(df_final)}")
+    print(f"  - Yahoo(신규): {len(df_final[df_final['source']=='yahoo'])}")
+    print(f"  - Kaggle(구형/OLD): {len(df_final[df_final['source']=='kaggle_legacy'])}")
     print("="*40)
-    print(f"  - 파일 보유 확인됨: {has_data} 개 (Safe)")
-    print(f"  - 다운로드 필요(0): {need_download} 개")
-    print(f"  📂 저장 완료: {MASTER_PATH}")
-    print("-" * 40)
-    print("👉 이제 Phase 2를 실행하면 '다운로드 필요' 개수만큼만 요청합니다.")
 
 if __name__ == "__main__":
     main()

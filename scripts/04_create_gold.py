@@ -1,36 +1,32 @@
 import pandas as pd
 import shutil
 import numpy as np
+import gc
 from pathlib import Path
 from tqdm import tqdm
 from collections import defaultdict
 import warnings
 
-# 경고 무시 (상관계수 계산 시 runtime warning 등)
+# 경고 무시
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=RuntimeWarning)
 
 # ==========================================
-# [Phase 4] Gold Layer: Robust Dedup (Corr & Stitch)
+# [Phase 4] Gold Layer: Ratio-Adjusted Stitching
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parent.parent
 SILVER_DIR = BASE_DIR / "data" / "silver" / "daily_prices"
 GOLD_DIR = BASE_DIR / "data" / "gold" / "daily_prices"
 
 def get_metadata(file_path):
-    """
-    파일을 가볍게 읽어서 '시작일(Start Date)'과 '종료일(End Date)' 추출
-    이 정보로 1차 그룹핑을 수행함 (가격 비교 X)
-    """
     try:
-        # 인덱스만 빠르게 로드 가능하면 좋지만, parquet 특성상 컬럼 하나 읽는게 빠름
         df = pd.read_parquet(file_path, columns=['Close'])
         if df.empty: return None
         
         start_date = df.index[0]
         end_date = df.index[-1]
-        
-        # 그룹핑 키: "YYYY-MM" (같은 달에 시작한 종목끼리 비교)
         start_key = start_date.strftime("%Y-%m")
+        last_price = float(df['Close'].iloc[-1])
         
         return {
             'ticker': file_path.stem,
@@ -38,160 +34,186 @@ def get_metadata(file_path):
             'start_key': start_key,
             'start_date': start_date,
             'end_date': end_date,
+            'last_price': last_price,
             'count': len(df)
         }
     except:
         return None
 
-def calculate_correlation(path_a, path_b):
+def calculate_correlation_optimized(meta_a, meta_b, window=120):
     """
-    [Robust] 두 파일의 겹치는 구간 상관계수 계산
-    - 표준편차가 0인(주가 변동 없는) 경우를 방어하여 RuntimeWarning 제거
+    상관계수 계산 (가격 필터 + 윈도우 슬라이싱)
+    * 주의: 상관계수는 스케일(x10, x0.1)에 영향을 받지 않으므로
+      액면분할 전/후 데이터라도 상관계수는 높게 나옵니다.
+      따라서 '비율 보정'은 stitch 단계에서 별도로 수행해야 합니다.
     """
+    # 1. Price Filter (너무 터무니없는 가격 차이는 필터링하되, 액면분할 고려하여 범위 완화)
+    # 액면분할은 보통 1/10, 1/50 등이므로 비율로 체크해야 함.
+    # 하지만 여기서는 '상관계수'를 믿고 Price Filter는 최소한의 방어(0원 등)만 수행
+    p1, p2 = meta_a['last_price'], meta_b['last_price']
+    if p1 == 0 or p2 == 0: return 0.0
+    
+    # 2. Correlation
     try:
-        # 필요한 컬럼만 로드
-        df_a = pd.read_parquet(path_a, columns=['Close'])
-        df_b = pd.read_parquet(path_b, columns=['Close'])
+        df_a = pd.read_parquet(meta_a['path'], columns=['Close'])
+        df_b = pd.read_parquet(meta_b['path'], columns=['Close'])
         
-        # 교집합 구간 찾기
-        common_idx = df_a.index.intersection(df_b.index)
+        common = df_a.index.intersection(df_b.index)
+        if len(common) < 30: return 0.0
         
-        # 겹치는 구간이 너무 짧으면 판단 불가 (최소 30일)
-        if len(common_idx) < 30:
-            return 0.0
+        if len(common) > window:
+            common = common[-window:]
             
-        series_a = df_a.loc[common_idx, 'Close'].astype(float)
-        series_b = df_b.loc[common_idx, 'Close'].astype(float)
+        sa = df_a.loc[common, 'Close'].astype('float32')
+        sb = df_b.loc[common, 'Close'].astype('float32')
         
-        # [핵심 수정] 표준편차가 0인지 확인 (Constant Value Check)
-        # 1e-9보다 작으면 변동이 거의 없는 것으로 간주
-        if series_a.std() < 1e-9 or series_b.std() < 1e-9:
-            return 0.0 # 변동이 없으면 상관관계 계산 불가 -> 무시
-            
-        # 상관계수 계산
-        corr = series_a.corr(series_b)
+        if sa.std() < 1e-6 or sb.std() < 1e-6: return 0.0
         
-        # 결과가 NaN이면 0으로 처리
-        if pd.isna(corr):
-            return 0.0
-            
-        return corr
-    except Exception:
-        # 파일 로드 실패 등 모든 에러 시 0.0 반환 (안전하게 Skip)
+        return sa.corr(sb)
+    except:
         return 0.0
 
 def stitch_and_save(main_meta, sub_metas, output_dir):
     """
-    Main 데이터를 기준으로 Sub 데이터들을 이어붙여서(Stitching) 저장
+    [핵심 수정] Ratio-Based Adjusting Stitching
+    Main(최신/Yahoo) 데이터를 기준으로, Sub(과거/Kaggle) 데이터의 스케일을 보정하여 병합.
     """
     try:
-        # 1. Main 로드
+        # 1. Main 로드 (기준 데이터 - Yahoo/최신)
         main_df = pd.read_parquet(main_meta['path'])
         
-        # 2. Sub 순회하며 구멍 메우기
+        # 2. Sub 순회하며 보정 후 병합
         for sub in sub_metas:
             sub_df = pd.read_parquet(sub['path'])
-            # combine_first: main의 결측치를 sub의 값으로 채움 (인덱스 합집합)
+            
+            # --- [Adjusting Logic Start] ---
+            # 겹치는 구간 찾기
+            common_idx = main_df.index.intersection(sub_df.index)
+            
+            if not common_idx.empty:
+                # 겹치는 구간 중 '가장 최신 날짜'를 기준으로 비율 계산
+                # (과거 날짜보다 최신 날짜가 데이터 정합성이 높을 확률이 큼)
+                pivot_date = common_idx[-1]
+                
+                p_main = float(main_df.loc[pivot_date, 'Close'])
+                p_sub = float(sub_df.loc[pivot_date, 'Close'])
+                
+                if p_sub != 0:
+                    ratio = p_main / p_sub
+                    
+                    # 비율이 1.0과 유의미하게 차이나면 (예: 1% 이상) -> 보정 수행
+                    # 예: main=12만원, sub=120만원 -> ratio=0.1
+                    if abs(1.0 - ratio) > 0.01:
+                        # 숫자형 컬럼 전체에 비율 곱하기 (Open, High, Low, Close, Volume 등)
+                        # 주의: Volume은 주가가 낮아지면(액면분할) 보통 늘어나므로 반대로 나눠야 할 수도 있으나,
+                        # Yahoo의 수정주가(Adj Close) 로직을 따라가기 위해 가격은 곱하고, 볼륨은 나누는게 정석.
+                        # 하지만 여기서는 단순화를 위해 가격만 보정하거나, Volume도 같은 비율로 조정(Split의 역)
+                        
+                        # [Price Correction]
+                        price_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Adj Close'] if c in sub_df.columns]
+                        sub_df[price_cols] = sub_df[price_cols] * ratio
+                        
+                        # [Volume Correction]
+                        # 액면분할(주가 1/10) -> 거래량(10배) 이어야 함.
+                        # 주가 ratio가 0.1이면, Volume은 1/0.1 = 10배가 되어야 함.
+                        if 'Volume' in sub_df.columns:
+                            sub_df['Volume'] = sub_df['Volume'] / ratio
+                            
+                        # print(f"    🔧 Adjusting {sub['ticker']} by ratio {ratio:.4f} (Pivot: {pivot_date.date()})")
+            
+            # --- [Adjusting Logic End] ---
+
+            # 3. 병합 (Main 우선, 빈 곳을 보정된 Sub로 채움)
             main_df = main_df.combine_first(sub_df)
             
-        # 3. Gold 저장
+        # 4. 데이터 정리
+        main_df = main_df[~main_df.index.duplicated(keep='last')]
+        main_df.sort_index(inplace=True)
+
+        # 5. Gatekeeper (음수 및 급등락 확인)
+        cols = [c for c in ['Open','High','Low','Close'] if c in main_df.columns]
+        if (main_df[cols] < 0).any().any(): return False
+
+        pct = main_df['Close'].pct_change().dropna()
+        # 보정을 했음에도 불구하고 미친 변동성이 있다면 Reject
+        if ((pct > 3.0) | (pct < -0.9)).any():
+            return False
+
+        # 6. 저장
         save_path = output_dir / f"{main_meta['ticker']}.parquet"
         main_df.to_parquet(save_path)
         return True
     except Exception as e:
-        print(f"    ❌ 병합 실패 ({main_meta['ticker']}): {e}")
+        # print(f"Error merging: {e}")
         return False
 
 def main():
-    print(">>> [Phase 4] Gold Layer 생성 (Correlation Based Stitching)")
+    print(">>> [Phase 4] Gold Layer 생성 (Ratio Adjusted)")
     
-    # 1. 폴더 초기화
-    if GOLD_DIR.exists():
-        shutil.rmtree(GOLD_DIR)
+    if GOLD_DIR.exists(): shutil.rmtree(GOLD_DIR)
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
     
     silver_files = list(SILVER_DIR.glob("*.parquet"))
     print(f"  📖 Silver 파일 스캔: {len(silver_files)} 개")
 
-    # 2. 1차 그룹핑 (Start Date Bucketing)
-    # { '2012-05': [meta1, meta2, ...], ... }
     buckets = defaultdict(list)
-    
-    for f in tqdm(silver_files, desc="1. Grouping by Start Date"):
+    for f in tqdm(silver_files, desc="Bucketing"):
         meta = get_metadata(f)
-        if meta:
-            buckets[meta['start_key']].append(meta)
+        if meta: buckets[meta['start_key']].append(meta)
 
-    # 3. 그룹별 Correlation 검사 및 병합
-    processed_tickers = set()
+    success_count = 0
     dedup_count = 0
-    merged_files_count = 0
     
-    print("  🔍 2. 정밀 분석 (Correlation) & 병합 (Stitching)...")
+    print("  🔍 분석 및 병합 (Price Adjusting 적용)...")
     
-    # 진행상황 표시를 위해 버킷 순회
-    for start_key, candidates in tqdm(buckets.items(), desc="Processing Buckets"):
-        if len(candidates) == 1:
-            # 비교 대상 없음 -> 바로 이관
+    sorted_keys = sorted(buckets.keys())
+    pbar = tqdm(sorted_keys)
+    
+    for key in pbar:
+        candidates = buckets[key]
+        n = len(candidates)
+        pbar.set_description(f"Bucket {key} ({n})")
+        
+        if n == 1:
             meta = candidates[0]
             shutil.copy2(meta['path'], GOLD_DIR / f"{meta['ticker']}.parquet")
-            merged_files_count += 1
+            success_count += 1
             continue
             
-        # 그룹 내에서 중복 찾기
-        # 데이터가 많은(최신/긴) 순서대로 정렬하여 'Main' 후보 선정
-        # 기준: 1. 종료일(최신) 2. 데이터개수(긴것)
         candidates.sort(key=lambda x: (x['end_date'], x['count']), reverse=True)
+        processed = set()
         
-        # 방문 체크용 (그룹 내 로컬)
-        local_processed = set()
-        
-        for i in range(len(candidates)):
-            main_cand = candidates[i]
-            if main_cand['ticker'] in local_processed:
-                continue
-                
+        for i in range(n):
+            main = candidates[i]
+            if main['ticker'] in processed: continue
+            
             duplicates = []
-            
-            # 나보다 데이터가 적거나 오래된 놈들과 비교
-            for j in range(i + 1, len(candidates)):
-                sub_cand = candidates[j]
-                if sub_cand['ticker'] in local_processed:
-                    continue
+            for j in range(i + 1, n):
+                sub = candidates[j]
+                if sub['ticker'] in processed: continue
                 
-                # Correlation 계산
-                corr = calculate_correlation(main_cand['path'], sub_cand['path'])
-                
-                if corr > 0.99: # 99% 이상 일치하면 동일 종목 간주
-                    duplicates.append(sub_cand)
-                    local_processed.add(sub_cand['ticker'])
+                corr = calculate_correlation_optimized(main, sub)
+                if corr > 0.99:
+                    duplicates.append(sub)
+                    processed.add(sub['ticker'])
                     dedup_count += 1
-                    # 로그 출력 (확인용)
-                    # print(f"    🔗 중복 발견: {main_cand['ticker']} == {sub_cand['ticker']} (Corr: {corr:.4f})")
             
-            # 병합 및 저장
             if duplicates:
-                stitch_and_save(main_cand, duplicates, GOLD_DIR)
+                saved = stitch_and_save(main, duplicates, GOLD_DIR)
+                if saved: success_count += 1
             else:
-                # 중복 없으면 그냥 복사
-                shutil.copy2(main_cand['path'], GOLD_DIR / f"{main_cand['ticker']}.parquet")
+                shutil.copy2(main['path'], GOLD_DIR / f"{main['ticker']}.parquet")
+                success_count += 1
             
-            local_processed.add(main_cand['ticker'])
-            merged_files_count += 1
+            processed.add(main['ticker'])
+            
+        if n > 1000: gc.collect()
 
     print("\n" + "="*40)
-    print("  ✅ Gold Layer 생성 완료")
-    print(f"  - 원본(Silver): {len(silver_files)} 개")
-    print(f"  - 중복 병합됨(Dedup): {dedup_count} 건")
-    print(f"  - 최종 Gold 파일: {len(list(GOLD_DIR.glob('*.parquet')))} 개")
+    print(f"  ✅ Gold Layer 완료")
+    print(f"  - 최종 저장: {success_count}")
+    print(f"  - 통합 및 보정: {dedup_count}")
     print("="*40)
-    
-    # 중복 제거 리포트 (옵션)
-    if dedup_count > 0:
-        print(f"  💡 {dedup_count}개의 과거 티커(FB 등)가 최신 티커(META 등)로 통합되었습니다.")
-    
-    print("👉 이제 데이터는 물리적(Phase 3)으로나 논리적(Phase 4)으로 완벽합니다.")
-    print("👉 'Platinum Layer (Feature Engineering)' 단계로 넘어가십시오.")
 
 if __name__ == "__main__":
     main()
