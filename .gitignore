@@ -3,3 +3,4 @@
 /data
 /backups
 run_pipeline.sh
+.env
