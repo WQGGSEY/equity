@@ -43,5 +43,31 @@ ACTIVE_FEATURES = [
             'd': 0.4,                  # 차분 차수
         }
     },
-    # 추후 다른 피처들(PCA 등)도 여기에 추가
+    {
+        'class': 'MovingAverage',
+        'module': 'src.features.technical',
+        'params': {
+            'window': 5
+        }
+    },
+    {
+        'class': 'FinancialContrastiveDataset',
+        'module': 'src.model.dataset',
+        'params': {
+            # (1) Dataset Arguments (필수)
+            'view_1_cols': ["FD_Open", "FD_Close"],
+            'view_2_cols': ["FD_High", "FD_Low"],
+            'window_size': 64,
+            
+            # (2) Training Hyperparameters (Dataset은 무시, Script가 사용)
+            'batch_size': 128,
+            'num_workers': 4,
+            'train_split_ratio': 0.5,
+            'projection_dim': 128,
+            'temperature': 0.1,
+            'learning_rate': 1e-3,
+            'epochs': 50
+        }
+    },
+
 ]
