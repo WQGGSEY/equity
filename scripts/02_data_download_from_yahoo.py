@@ -2,181 +2,122 @@ import pandas as pd
 import yfinance as yf
 import time
 import random
+import sys
 from pathlib import Path
-from datetime import datetime
 from tqdm import tqdm
+from datetime import datetime
 
-# ==========================================
-# [Phase 2] Smart Download (Safe Mode & Filtered)
-# ==========================================
+# Config 로드
 BASE_DIR = Path(__file__).resolve().parent.parent
-MASTER_PATH = BASE_DIR / "data" / "bronze" / "master_ticker_list.csv"
-YAHOO_DATA_DIR = BASE_DIR / "data" / "bronze" / "yahoo_price_data"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-# [안전 설정] 속도를 줄여서 차단을 방지함
-BATCH_SIZE = 20
-USE_THREADS = False  # True면 빠르지만 차단됨 -> False로 안전하게
-
-def normalize_ticker_for_download(ticker):
-    return str(ticker).replace(".", "-").upper()
+from src.config import MASTER_PATH, BRONZE_DIR, BATCH_SIZE, USE_THREADS, DATE_FORMAT
 
 def is_junk_ticker(ticker):
-    """
-    분석 가치가 없는 워런트(W), 권리(R), 유닛(U), 우선주(P) 등을 필터링
-    예: JOBY-WT, AGFSW, HYAC-U
-    """
     t = str(ticker).upper()
-    
-    # 명백한 워런트 표기
     if "-WT" in t or "WARRANT" in t: return True
-    
-    # 5글자 이상인데 끝자리가 파생상품 코드인 경우
-    # (NASDAQ 데이터에서 흔함)
-    if len(t) >= 5:
-        suffix = t[-1]
-        if suffix in ['W', 'R', 'P', 'U', 'Z']: # W:Warrant, R:Right, P:Preferred, U:Unit
-            return True
-            
+    if len(t) >= 5 and t[-1] in ['W', 'R', 'P', 'U']: return True
     return False
 
+def save_single_ticker(df, ticker):
+    try:
+        safe_ticker = str(ticker).replace(".", "-").upper()
+        save_dir = BRONZE_DIR / f"ticker={safe_ticker}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / "price.parquet"
+        df.to_parquet(save_path)
+        return str(save_path.relative_to(BASE_DIR))
+    except:
+        return None
+
 def main():
-    print(">>> [Phase 2] 안전모드 다운로드 (Junk Filter + Anti-Ban)")
+    print(">>> [Script 02] 데이터 다운로드 (Safe Mode & Fail Count 적용)")
     
     if not MASTER_PATH.exists():
         print("❌ 장부 파일이 없습니다.")
         return
 
-    # 1. 장부 로드
     df = pd.read_csv(MASTER_PATH)
     
-    # 2. 타겟 선정 (Count=0)
+    # fail_count 컬럼 보장
+    if 'fail_count' not in df.columns: df['fail_count'] = 0
+    if 'last_failed_date' not in df.columns: df['last_failed_date'] = None
+    
+    # 다운로드 대상: 데이터가 없거나(count=0) 업데이트가 필요한 경우
+    # 여기서는 초기화를 위해 count=0 이고 fail_count < 5 인 것만
     df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-    raw_targets = df[df['count'] == 0]['ticker'].tolist()
+    targets = df[
+        (df['count'] == 0) & 
+        (df['fail_count'] < 5) &
+        (df['is_active'] == True)
+    ]['ticker'].tolist()
     
-    print(f"  📖 원본 대상: {len(raw_targets)} 개")
-    
-    # [필터링] 쓰레기 티커 제거
-    clean_targets = []
-    skipped_junk = 0
-    
-    for t in raw_targets:
-        if is_junk_ticker(t):
-            skipped_junk += 1
-            # 장부에는 'N/A' 등으로 표시해두면 좋지만, 일단은 건너뜀
-        else:
-            clean_targets.append(t)
-            
-    print(f"  🗑️ 파생상품(W/R/U) 제외: {skipped_junk} 개")
-    print(f"  🎯 최종 다운로드 대상: {len(clean_targets)} 개")
-    
-    if not clean_targets:
-        print("✅ 다운로드할 종목이 없습니다.")
-        return
+    clean_targets = [t for t in targets if not is_junk_ticker(t)]
+    print(f"  🎯 다운로드 대상: {len(clean_targets)} 개 (Junk 제외됨)")
 
-    # 3. 배치 다운로드
     chunks = [clean_targets[i:i + BATCH_SIZE] for i in range(0, len(clean_targets), BATCH_SIZE)]
+    today_str = datetime.now().strftime(DATE_FORMAT)
     
     success_cnt = 0
-    fail_cnt = 0
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    print(f"  🚀 다운로드 시작 (배치: {BATCH_SIZE}, 스레드: {USE_THREADS})")
     
     for chunk in tqdm(chunks, desc="Downloading"):
         try:
-            yahoo_tickers = [normalize_ticker_for_download(t) for t in chunk]
-            
-            # [요청] 에러나면 잠시 대기 후 재시도
-            try:
-                data = yf.download(
-                    yahoo_tickers, 
-                    period="max", 
-                    auto_adjust=True, 
-                    group_by='ticker', 
-                    progress=False, 
-                    threads=USE_THREADS  # 안전모드
-                )
-            except Exception as e:
-                print(f"  ⚠️ 네트워크/API 에러, 10초 대기... ({e})")
-                time.sleep(10)
-                continue
+            # GM_OLD 제외
+            real_tickers = [t for t in chunk if "_OLD" not in t]
+            if not real_tickers: continue
+
+            # yfinance 다운로드
+            data = yf.download(
+                real_tickers, period="max", auto_adjust=True, 
+                group_by='ticker', progress=False, threads=USE_THREADS
+            )
             
             if data is None or data.empty:
-                fail_cnt += len(chunk)
+                # 전체 실패 처리
+                for t in real_tickers:
+                    mask = df['ticker'] == t
+                    df.loc[mask, 'fail_count'] += 1
+                    df.loc[mask, 'last_failed_date'] = today_str
                 continue
 
-            # 결과 처리
-            for t_raw, t_yahoo in zip(chunk, yahoo_tickers):
+            for t in real_tickers:
+                mask = df['ticker'] == t
                 try:
-                    if len(yahoo_tickers) == 1:
-                        sub_df = data
-                    else:
-                        if t_yahoo not in data.columns.levels[0]:
-                            fail_cnt += 1
-                            continue
-                        sub_df = data[t_yahoo].copy()
-                    
-                    # 유효성 검사
-                    if sub_df.isnull().all().all():
-                        fail_cnt += 1
-                        continue
+                    sub_df = pd.DataFrame()
+                    if len(real_tickers) == 1: sub_df = data
+                    elif t in data.columns.levels[0]: sub_df = data[t].copy()
                     
                     sub_df.dropna(how='all', inplace=True)
-                    if sub_df.empty:
-                        fail_cnt += 1
-                        continue
-
-                    # 인덱스 정리
-                    if not isinstance(sub_df.index, pd.DatetimeIndex):
-                        sub_df.reset_index(inplace=True)
-                        if 'Date' in sub_df.columns:
-                            sub_df['Date'] = pd.to_datetime(sub_df['Date'])
-                            sub_df.set_index('Date', inplace=True)
                     
-                    if sub_df.index.tz is not None:
-                        sub_df.index = sub_df.index.tz_localize(None)
-                    
-                    sub_df.sort_index(inplace=True)
-
-                    # 저장
-                    save_dir = YAHOO_DATA_DIR / f"ticker={t_raw}"
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    save_path = save_dir / "price.parquet"
-                    sub_df.to_parquet(save_path)
-                    
-                    # 장부 업데이트
-                    idx = df[df['ticker'] == t_raw].index
-                    if not idx.empty:
-                        df.loc[idx, 'start_date'] = sub_df.index[0].strftime("%Y-%m-%d")
-                        df.loc[idx, 'end_date'] = sub_df.index[-1].strftime("%Y-%m-%d")
-                        df.loc[idx, 'count'] = len(sub_df)
-                        df.loc[idx, 'file_path'] = str(save_path.relative_to(BASE_DIR))
-                        df.loc[idx, 'last_updated'] = today_str
-                        df.loc[idx, 'source'] = 'yahoo_new'
-                        df.loc[idx, 'is_active'] = True
-                    
-                    success_cnt += 1
-                    
+                    if not sub_df.empty:
+                        # 저장 및 메타 갱신
+                        rel_path = save_single_ticker(sub_df, t)
+                        if rel_path:
+                            df.loc[mask, 'count'] = len(sub_df)
+                            df.loc[mask, 'start_date'] = sub_df.index[0].strftime(DATE_FORMAT)
+                            df.loc[mask, 'end_date'] = sub_df.index[-1].strftime(DATE_FORMAT)
+                            df.loc[mask, 'file_path'] = rel_path
+                            df.loc[mask, 'last_updated'] = today_str
+                            df.loc[mask, 'fail_count'] = 0 # 성공 시 초기화
+                            df.loc[mask, 'note'] = 'Downloaded (Script)'
+                            success_cnt += 1
+                    else:
+                        # 빈 데이터 -> 실패 처리
+                        df.loc[mask, 'fail_count'] += 1
+                        df.loc[mask, 'last_failed_date'] = today_str
+                        
                 except Exception:
-                    fail_cnt += 1
-            
-            # Rate Limit 방지를 위한 충분한 휴식
-            time.sleep(random.uniform(2.0, 4.0))
+                    df.loc[mask, 'fail_count'] += 1
+
+            # 차단 방지 딜레이
+            time.sleep(random.uniform(1.0, 2.0))
             
         except Exception as e:
             print(f"Batch Error: {e}")
-            fail_cnt += len(chunk)
-            df.to_csv(MASTER_PATH, index=False) # 중간 저장
 
-    # 4. 최종 저장
     df.to_csv(MASTER_PATH, index=False)
-    
-    print("\n" + "="*40)
-    print("  ✅ 완료")
-    print(f"  - 성공: {success_cnt}")
-    print(f"  - 실패/없음: {fail_cnt}")
-    print(f"  - 제외된 Junk: {skipped_junk}")
-    print(f"  📂 {MASTER_PATH}")
+    print(f"  ✅ 다운로드 완료 (성공: {success_cnt})")
 
 if __name__ == "__main__":
     main()
