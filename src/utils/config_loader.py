@@ -1,26 +1,43 @@
 import yaml
 import importlib
+import collections.abc
 from pathlib import Path
 
+def deep_update(d, u):
+    """딕셔너리를 재귀적으로 병합하는 함수 (Deep Merge)"""
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
 def load_config(config_path):
-    """YAML 파일을 읽어서 딕셔너리로 반환"""
+    """YAML 파일을 읽어서 딕셔너리로 반환 (상속 및 Deep Merge 지원)"""
     path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
     with open(path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
     
-    # base_config가 있다면 읽어서 병합 (간단한 상속 구현)
+    # base_config 상속 로직
     if 'base_config' in config:
-        base_path = path.parent.parent / Path(config['base_config']).name
-        # (경로는 프로젝트 구조에 따라 유연하게 조정 필요)
-        # 여기서는 간단히 configs/base.yaml을 찾는다고 가정
+        base_rel_path = config.pop('base_config') # 키 제거 후 병합
+        
+        # 1. 같은 폴더에서 찾기
+        base_path = path.parent / Path(base_rel_path).name
+        # 2. 없으면 지정된 경로(configs/base.yaml) 사용
         if not base_path.exists():
-            base_path = Path("configs/base.yaml")
-            
-        with open(base_path, 'r', encoding='utf-8') as bf:
-            base_config = yaml.safe_load(bf)
-            # Base에 현재 설정을 덮어씌움 (Merge)
-            base_config.update(config)
-            return base_config
+             base_path = Path(base_rel_path)
+        
+        if base_path.exists():
+            with open(base_path, 'r', encoding='utf-8') as bf:
+                base_config = yaml.safe_load(bf) or {}
+                # Base 위에 현재 Config를 덮어씀 (Deep Merge)
+                config = deep_update(base_config, config)
+        else:
+            print(f"⚠️ Warning: Base config not found at {base_path}")
             
     return config
 

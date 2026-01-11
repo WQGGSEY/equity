@@ -1,7 +1,3 @@
-현재 코드베이스(Data Pipeline, Feature Engineering, Backtesting Framework)를 기반으로 작성된 상세한 `README.md`입니다.
-
----
-
 # 📈 Equity Quantitative Research Platform
 
 이 프로젝트는 대량의 미국 주식 데이터를 수집, 정제하여 금융 특화 Feature(Dollar Bar, FracDiff, Embeddings)를 생성하고, 이를 기반으로 다양한 퀀트 전략을 검증(Backtest)할 수 있는 통합 연구 플랫폼입니다.
@@ -90,9 +86,9 @@ python scripts/07_backtest.py --config configs/strategies/golden_cross_v1.yaml
 ```python
 import pandas as pd
 import numpy as np
-from src.backtest.strategies.base import BaseStrategy
+from .base import Strategy
 
-class RSIStrategy(BaseStrategy):
+class RSIStrategy(Strategy):
     """
     RSI 기반 역추세 전략 예시
     """
@@ -131,22 +127,17 @@ class RSIStrategy(BaseStrategy):
 
 ```yaml
 # configs/strategies/rsi_v1.yaml
-defaults:
-  - base  # configs/base.yaml 상속
+base_config: "configs/base.yaml"
+
+experiment_name: "rsi_v1"
 
 strategy:
-  name: "RSI_Reversal_V1"
-  class: "src.backtest.strategies.rsi_strategy.RSIStrategy"  # 클래스 경로 지정
+  module: "src.backtest.strategies.rsi_strategy" # 클래스가 있는 파일 경로
+  class: "RSIStrategy"             # 사용할 클래스 이름
   params:
     rsi_period: 14
     buy_threshold: 30
     sell_threshold: 70
-
-backtest:
-  start_date: "2020-01-01"
-  end_date: "2023-12-31"
-  initial_capital: 10000.0
-
 ```
 
 ### Step 3: 실행

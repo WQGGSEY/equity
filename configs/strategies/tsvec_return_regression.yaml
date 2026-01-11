@@ -1,0 +1,15 @@
+base_config: "configs/base.yaml"
+
+experiment_name: "TS2Vec_Return_Regression_LongOnlySniper_V1"
+
+strategy:
+  # [수정] module과 class를 분리해야 합니다.
+  # 파일명(module)이 src/backtest/strategies/long_only_sniper.py 라면:
+  module: "src.backtest.strategies.regression"
+  class: "LongOnlySniperStrategy"
+  params:
+    feature_col: "ts2vec_manifold_0"
+    target_col: "FD_Close"
+    lookback_window: 20
+    top_n: 10
+    hold_period: 10
