@@ -1,0 +1,10 @@
+base_config: "configs/base.yaml"
+
+experiment_name: "TrendDip_Proxy_Test"
+strategy:
+  module: "src.backtest.strategies.golden_cross"
+  class: "TrendDipStrategy"
+  params:
+    fd_short: 5
+    fd_long: 20
+    trend_window: 60

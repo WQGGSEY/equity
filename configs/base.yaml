@@ -1,5 +1,7 @@
 backtest:
-  start_date: "2010-01-01"
+  # start_date: "2010-01-01"
+  # end_date: "2023-12-31"
+  start_date: "2000-01-01"
   end_date: "2023-12-31"
   initial_cash: 100000000
   fee_rate: 0.003

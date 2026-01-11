@@ -1,0 +1,11 @@
+base_config: "configs/base.yaml"
+
+experiment_name: "FD_Momentum_Proxy_Test"
+strategy:
+  module: "src.backtest.strategies.golden_cross"
+  class: "FDMomentumTop10Strategy"
+  params:
+    fd_short: 5
+    fd_long: 20
+    trend_window: 60
+    hold_period: 5

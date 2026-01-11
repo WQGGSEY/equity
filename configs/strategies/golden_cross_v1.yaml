@@ -6,6 +6,6 @@ strategy:
   module: "src.backtest.strategies.golden_cross"
   class: "GoldenCrossFDStrategy"
   params:
-    short_window: 5
-    long_window: 10
+    short_window: 1
+    long_window: 20
     top_n: 20

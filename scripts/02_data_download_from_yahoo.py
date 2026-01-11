@@ -32,7 +32,7 @@ def save_single_ticker(df, ticker):
         return None
 
 def main():
-    print(">>> [Script 02] 데이터 다운로드 (Safe Mode & Fail Count 적용)")
+    print(">>> [Script 02] 데이터 다운로드 (File Existence Check 적용)")
     
     if not MASTER_PATH.exists():
         print("❌ 장부 파일이 없습니다.")
@@ -44,17 +44,33 @@ def main():
     if 'fail_count' not in df.columns: df['fail_count'] = 0
     if 'last_failed_date' not in df.columns: df['last_failed_date'] = None
     
-    # 다운로드 대상: 데이터가 없거나(count=0) 업데이트가 필요한 경우
-    # 여기서는 초기화를 위해 count=0 이고 fail_count < 5 인 것만
+    # 데이터 타입 정리
     df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-    targets = df[
-        (df['count'] == 0) & 
-        (df['fail_count'] < 5) &
-        (df['is_active'] == True)
-    ]['ticker'].tolist()
+    df['fail_count'] = pd.to_numeric(df['fail_count'], errors='coerce').fillna(0)
     
+    # [수정] 다운로드 대상 선정 로직 개선 (실제 파일 존재 여부 확인)
+    targets = []
+    print("  🔍 다운로드 대상 분석 중 (파일 실존 여부 체크)...")
+    
+    for idx, row in df.iterrows():
+        # 1. 비활성 종목 제외
+        if not row['is_active']:
+            continue
+            
+        # 2. 실패 횟수 과다 종목 제외 (필요시 이 부분 주석 처리하여 재시도 강제 가능)
+        if row['fail_count'] >= 5:
+            continue
+            
+        # 3. 실제 파일 확인
+        safe_ticker = str(row['ticker']).replace(".", "-").upper()
+        expected_path = BRONZE_DIR / f"ticker={safe_ticker}" / "price.parquet"
+        
+        # 조건: 메타데이터상 개수가 0이거나, 실제 파일이 없는 경우
+        if row['count'] == 0 or not expected_path.exists():
+            targets.append(row['ticker'])
+
     clean_targets = [t for t in targets if not is_junk_ticker(t)]
-    print(f"  🎯 다운로드 대상: {len(clean_targets)} 개 (Junk 제외됨)")
+    print(f"  🎯 다운로드 대상: {len(clean_targets)} 개 (Junk 제외 및 Missing File 포함)")
 
     chunks = [clean_targets[i:i + BATCH_SIZE] for i in range(0, len(clean_targets), BATCH_SIZE)]
     today_str = datetime.now().strftime(DATE_FORMAT)
