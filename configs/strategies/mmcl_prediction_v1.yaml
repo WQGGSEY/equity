@@ -1,0 +1,14 @@
+# 기본 설정을 포함 (상속 개념은 아니지만 로더에서 합칠 예정)
+base_config: "configs/base.yaml"
+
+experiment_name: "MMCL_Prediction_V1"
+
+strategy:
+  module: "src.backtest.strategies.mmcl_prediction" # 클래스가 있는 파일 경로
+  class: "MMCL_Prediction_V1"             # 사용할 클래스 이름
+  params:
+    z_threshold: 6.5
+    max_pos: 5
+    hold_days: 10
+    train_window: 252
+    alpha: 0.5
