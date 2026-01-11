@@ -64,7 +64,7 @@ class MarketData:
             
         # Feature Matrix
         sample_cols = results[0][1].columns
-        feature_cols = [c for c in sample_cols if c not in price_cols and not c.startswith('FD_')]
+        feature_cols = [c for c in sample_cols if c not in price_cols]
         
         for col in feature_cols:
             data_dict = {t: ticker_map[t].get(col) for t in self.tickers}

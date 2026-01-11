@@ -1,0 +1,11 @@
+base_config: "configs/base.yaml"
+
+experiment_name: "FD_GoldenCross_MA5_MA20"
+
+strategy:
+  module: "src.backtest.strategies.golden_cross"
+  class: "GoldenCrossFDStrategy"
+  params:
+    short_window: 5
+    long_window: 10
+    top_n: 20

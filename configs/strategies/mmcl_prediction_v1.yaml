@@ -7,8 +7,8 @@ strategy:
   module: "src.backtest.strategies.mmcl_prediction" # 클래스가 있는 파일 경로
   class: "MMCL_Prediction_V1"             # 사용할 클래스 이름
   params:
-    z_threshold: 6.5
-    max_pos: 5
+    z_threshold: 7.0
+    max_pos: 
     hold_days: 10
-    train_window: 252
+    train_window: 126
     alpha: 0.5
