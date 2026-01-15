@@ -81,69 +81,131 @@ python scripts/07_backtest.py --config configs/strategies/golden_cross_v1.yaml
 
 ### Step 1: 전략 클래스 구현
 
-`src/backtest/strategies/rsi_strategy.py` 파일을 생성하고 코드를 작성합니다.
+`src/backtest/strategies/market_buy.py` 파일을 생성하고 코드를 작성합니다.
 
 ```python
-import pandas as pd
-import numpy as np
-from .base import Strategy
-
-class RSIStrategy(Strategy):
+class FDRebalanceStrategy(Strategy):
     """
-    RSI 기반 역추세 전략 예시
+    [FD Based Daily Rebalancing Strategy] (Fixed Version)
     """
-    def __init__(self, rsi_period=14, buy_threshold=30, sell_threshold=70):
-        super().__init__()
-        self.rsi_period = rsi_period
-        self.buy_threshold = buy_threshold
-        self.sell_threshold = sell_threshold
+    def __init__(self, top_n=10, ascending=False, feature_name='FD_TrdAmount'):
+        super().__init__(name=f"FD_Rebalance_Top{top_n}")
+        self.top_n = top_n
+        self.ascending = ascending
+        self.feature_name = feature_name
+        self.md = None
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Platinum 데이터(df)를 받아 'signal' 컬럼(1: 매수, -1: 매도, 0: 관망)을 반환
-        """
-        signals = pd.DataFrame(index=df.index)
-        signals['signal'] = 0
+    def initialize(self, market_data):
+        self.md = market_data
+        if self.feature_name not in self.md.features:
+            available = list(self.md.features.keys())
+            raise ValueError(f"❌ Feature '{self.feature_name}' not found in MarketData! Available: {available}")
+        print(f"⚖️ [FD Rebalance] initialized. Target Feature: {self.feature_name}, Top: {self.top_n}")
+
+    def on_bar(self, date, universe_tickers, portfolio):
+        orders = []
+        current_prices = self.md.prices['Close'].loc[date]
         
-        # 종가 기준 RSI 계산 (예시 로직)
-        close = df['Close']
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=self.rsi_period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=self.rsi_period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        # 1. Feature 데이터 가져오기
+        try:
+            feature_vals = self.md.features[self.feature_name].loc[date]
+        except KeyError:
+            return []
+
+        # 2. 유효 종목 필터링 및 랭킹 산출
+        valid_candidates = []
+        for t in universe_tickers:
+            val = feature_vals.get(t, np.nan)
+            price = current_prices.get(t, np.nan)
+            
+            # 가격과 피처 값이 모두 유효한 경우만 후보 등록
+            if not np.isnan(val) and not np.isnan(price) and price > 0:
+                valid_candidates.append((t, val))
         
-        # 신호 생성
-        signals.loc[rsi < self.buy_threshold, 'signal'] = 1  # 과매도 구간 매수
-        signals.loc[rsi > self.sell_threshold, 'signal'] = -1 # 과매수 구간 매도
+        if not valid_candidates:
+            return []
+
+        # 정렬
+        valid_candidates.sort(key=lambda x: x[1], reverse=not self.ascending)
+        top_picks = [x[0] for x in valid_candidates[:self.top_n]]
         
-        return signals
+        # 3. 목표 수량 계산 (Total Equity 기준 1/N)
+        total_equity = portfolio.cash
+        for t, qty in portfolio.holdings.items():
+            price = current_prices.get(t, np.nan)
+            # [수정] 보유 종목의 가격이 NaN이면 0으로 처리하여 전체 자산 가치 오염 방지
+            if pd.isna(price) or price <= 0:
+                price = 0
+            total_equity += qty * price
+            
+        target_amt_per_stock = total_equity / len(top_picks) if top_picks else 0
+        
+        # [안전장치] 만약 자산 계산이 잘못되어 NaN이나 음수가 나오면 매매 중단
+        if pd.isna(target_amt_per_stock) or target_amt_per_stock <= 0:
+            return []
+        
+        # 4. 주문 생성
+        
+        # (A) 매도 주문
+        current_holdings = list(portfolio.holdings.keys())
+        for t in current_holdings:
+            qty = portfolio.holdings[t]
+            price = current_prices.get(t, np.nan)
+            
+            # 가격 정보를 알 수 없으면 일단 매도 보류 (또는 시장가 강제 매도 고려 가능)
+            if pd.isna(price) or price <= 0:
+                continue
+
+            if t not in top_picks:
+                orders.append({'ticker': t, 'action': 'SELL', 'quantity': qty})
+            else:
+                # 리밸런싱 (비중 축소)
+                target_qty = int(target_amt_per_stock / price)
+                diff = target_qty - qty
+                if diff < 0:
+                    orders.append({'ticker': t, 'action': 'SELL', 'quantity': abs(diff)})
+        
+        # (B) 매수 주문
+        for t in top_picks:
+            price = current_prices.get(t, np.nan)
+            
+            # [수정] 가격 안전장치
+            if pd.isna(price) or price <= 0:
+                continue
+                
+            target_qty = int(target_amt_per_stock / price)
+            current_qty = portfolio.holdings.get(t, 0)
+            diff = target_qty - current_qty
+            
+            if diff > 0:
+                orders.append({'ticker': t, 'action': 'BUY', 'quantity': diff})
+                
+        return orders
 
 ```
 
 ### Step 2: 설정 파일 생성
 
-`configs/strategies/rsi_v1.yaml` 파일을 생성합니다.
+`configs/strategies/market_buy_v1.yaml` 파일을 생성합니다.
 
 ```yaml
 # configs/strategies/rsi_v1.yaml
 base_config: "configs/base.yaml"
 
-experiment_name: "rsi_v1"
-
+experiment_name: "FD_TrdAmount_Rebalance_Base"
 strategy:
-  module: "src.backtest.strategies.rsi_strategy" # 클래스가 있는 파일 경로
-  class: "RSIStrategy"             # 사용할 클래스 이름
+  module: "src.backtest.strategies.market_buy"
+  class: "FDRebalanceStrategy"
   params:
-    rsi_period: 14
-    buy_threshold: 30
-    sell_threshold: 70
+    top_n: 10
+    ascending: false        # False: FD_TrdAmount가 큰 순서대로 (True면 작은 순서대로)
+    feature_name: "TrdAmount"
 ```
 
 ### Step 3: 실행
 
 ```bash
-python scripts/07_backtest.py --config configs/strategies/rsi_v1.yaml
+python scripts/07_backtest.py --config configs/strategies/market_buy_v1.yaml
 
 ```
 

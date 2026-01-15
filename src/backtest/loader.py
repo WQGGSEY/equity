@@ -78,6 +78,13 @@ class MarketData:
         print("  ✅ Big Matrix Ready.")
         
         # 3. 캐시 저장
+        for col, df in self.prices.items():
+            self.prices[col] = df.astype('float32')
+            
+        for col, df in self.features.items():
+            self.features[col] = df.astype('float32')
+
+        # 3. 캐시 저장
         save_data = {
             'prices': self.prices,
             'features': self.features,
@@ -85,6 +92,7 @@ class MarketData:
             'dates': self.dates
         }
         self.cache_manager.save(save_data, cache_name)
+
 
 def _load_single_parquet(path):
     try:

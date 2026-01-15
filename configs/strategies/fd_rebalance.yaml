@@ -7,4 +7,4 @@ strategy:
   params:
     top_n: 10
     ascending: false        # False: FD_TrdAmount가 큰 순서대로 (True면 작은 순서대로)
-    feature_name: "FD_TrdAmount"
+    feature_name: "TrdAmount"

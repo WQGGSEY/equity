@@ -5,10 +5,23 @@ import gc
 from collections import defaultdict
 from tqdm import tqdm
 import warnings
+from pathlib import Path
+import sys
+
+# 프로젝트 루트 경로 설정
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 from src.config import *
 
 warnings.simplefilter(action='ignore', category=RuntimeWarning)
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# [핵심] 허용 가능한 주식 분할/병합 비율 (Whitelist)
+# 1.0 (동일), 2(2:1), 0.5(1:2), 3, 0.33, 4, 0.25, 5, 0.2, 10, 0.1, 20, 0.05
+VALID_RATIOS = [1.0, 2.0, 0.5, 3.0, 1/3, 4.0, 0.25, 5.0, 0.2, 10.0, 0.1, 20.0, 0.05]
+RATIO_TOLERANCE = 0.05  # 오차 허용 범위 (5%)
 
 def get_metadata(file_path):
     try:
@@ -17,7 +30,7 @@ def get_metadata(file_path):
         return {
             'ticker': file_path.stem,
             'path': file_path,
-            'start_key': df.index[0].strftime("%Y-%m"),
+            'start_key': df.index[0].strftime("%Y-%m"), # 그룹핑 키
             'start_date': df.index[0],
             'end_date': df.index[-1],
             'last_price': float(df['Close'].iloc[-1]),
@@ -25,78 +38,110 @@ def get_metadata(file_path):
         }
     except: return None
 
-def calculate_correlation_optimized(meta_a, meta_b, window=120):
-    p1, p2 = meta_a['last_price'], meta_b['last_price']
-    if p1 == 0 or p2 == 0: return 0.0
-    
-    # [Anomaly 대응] Penny Stock Skip
-    # 둘 다 동전주면 병합 가치 없음 (병목 방지)
-    if p1 < PENNY_STOCK_THRESHOLD and p2 < PENNY_STOCK_THRESHOLD: return 0.0
-    
-    # ❌ [삭제됨] 가격 차이 50% 필터 제거 
-    # 이유: 액면분할(10배 차이 등) 종목도 잡아내야 함.
-    # if abs(p1 - p2) / max(p1, p2) > 0.5: return 0.0 
-
-    # Window Slicing Correlation
+def is_valid_merge_candidate(meta_a, meta_b, window=120):
+    """
+    [Strict Logic] 엄격한 병합 후보 검증
+    1. 겹치는 구간 확인
+    2. 가격 비율(Ratio)이 화이트리스트에 있는지 확인
+    3. 보정 후 상관계수 확인
+    """
     try:
+        # 파일 로드 (Close만)
         df_a = pd.read_parquet(meta_a['path'], columns=['Close'])
         df_b = pd.read_parquet(meta_b['path'], columns=['Close'])
-        common = df_a.index.intersection(df_b.index)
         
-        if len(common) < 30: return 0.0
-        if len(common) > window: common = common[-window:]
+        # 1. 교집합 구간 찾기
+        common_idx = df_a.index.intersection(df_b.index)
+        if len(common_idx) < 30: # 최소 30일 이상 겹쳐야 판단 가능
+            return False, 0.0
+
+        # 최근 window만 사용 (너무 먼 과거 데이터 배제)
+        if len(common_idx) > window:
+            common_idx = common_idx[-window:]
+
+        pa = df_a.loc[common_idx, 'Close']
+        pb = df_b.loc[common_idx, 'Close']
+
+        # 2. 가격 비율 검사 (Smart Ratio Check)
+        # 평균 가격 비율 계산
+        ratio_series = pa / pb
+        median_ratio = ratio_series.median()
+        
+        # 화이트리스트 중 매칭되는 것이 있는지 확인
+        is_ratio_valid = False
+        target_ratio = 1.0
+        
+        for valid_r in VALID_RATIOS:
+            # 비율이 오차 범위 내에 들어오는지 확인
+            if abs(median_ratio - valid_r) / valid_r < RATIO_TOLERANCE:
+                is_ratio_valid = True
+                target_ratio = valid_r
+                break
+        
+        if not is_ratio_valid:
+            # 비율이 이상하면(예: 18.4배) 즉시 탈락 -> CHPT 사태 방지
+            return False, 0.0
+
+        # 3. 보정 후 상관계수 계산
+        # B의 가격을 비율만큼 보정하여 A와 비교
+        pb_adjusted = pb * target_ratio
+        
+        if pa.std() < 1e-6 or pb_adjusted.std() < 1e-6:
+            return False, 0.0
             
-        sa = df_a.loc[common, 'Close'].astype('float32')
-        sb = df_b.loc[common, 'Close'].astype('float32')
+        corr = pa.corr(pb_adjusted)
         
-        if sa.std() < 1e-6 or sb.std() < 1e-6: return 0.0
-        return sa.corr(sb)
-    except: return 0.0
+        # 상관계수 0.99 이상이어야 통과
+        return (corr > 0.99), target_ratio
+
+    except Exception:
+        return False, 0.0
 
 def stitch_and_save(main_meta, sub_metas, output_dir):
     try:
         main_df = pd.read_parquet(main_meta['path'])
         
         for sub in sub_metas:
+            # 검증 로직 재호출하여 정확한 비율 가져오기
+            valid, ratio = is_valid_merge_candidate(main_meta, sub)
+            if not valid: continue # 방어 코드
+
             sub_df = pd.read_parquet(sub['path'])
             
-            # [Anomaly 대응] Ratio Adjusting (단층 제거)
-            common = main_df.index.intersection(sub_df.index)
-            if not common.empty:
-                pivot = common[-1]
-                p_main = float(main_df.loc[pivot, 'Close'])
-                p_sub = float(sub_df.loc[pivot, 'Close'])
-                if p_sub != 0:
-                    ratio = p_main / p_sub
-                    # 1% 이상 차이나면 보정 (액면분할 대응)
-                    if abs(1.0 - ratio) > 0.01:
-                        cols = [c for c in ['Open','High','Low','Close','Adj Close'] if c in sub_df.columns]
-                        sub_df[cols] *= ratio
-                        if 'Volume' in sub_df.columns: sub_df['Volume'] /= ratio
-            
+            # [Smart Adjust] 검증된 비율로 데이터 보정
+            # ratio = p_main / p_sub 이므로 p_sub * ratio = p_main
+            if abs(ratio - 1.0) > 0.01:
+                cols = [c for c in ['Open','High','Low','Close','Adj Close'] if c in sub_df.columns]
+                sub_df[cols] *= ratio
+                if 'Volume' in sub_df.columns:
+                    sub_df['Volume'] /= ratio # 가격이 오르면 거래량은 줄어듬 (분할 반대)
+
+            # 병합 (Main이 우선)
             main_df = main_df.combine_first(sub_df)
             
+        # 중복 제거 및 정렬
         main_df = main_df[~main_df.index.duplicated(keep='last')]
         main_df.sort_index(inplace=True)
 
+        # 최종 이상치 검사 (음수 등)
         cols = [c for c in ['Open','High','Low','Close'] if c in main_df.columns]
-        if (main_df[cols] < 0).any().any(): return False
+        if (main_df[cols] <= 0).any().any(): return False
 
-        pct = main_df['Close'].pct_change().dropna()
-        if ((pct > 3.0) | (pct < -0.9)).any(): return False
-
+        # 저장
         save_path = output_dir / f"{main_meta['ticker']}.parquet"
         main_df.to_parquet(save_path)
         return True
     except: return False
 
 def process_gold():
-    print(">>> [Phase 5] Gold Processor (Final Logic Sync)")
+    print(">>> [Phase 5] Gold Processor (Strict Smart Merge)")
     
     if GOLD_DIR.exists(): shutil.rmtree(GOLD_DIR)
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
     silver_files = list(SILVER_DIR.glob("*.parquet"))
+    
+    # 1. Bucketing (시작일 기준 그룹화 - 유지)
     buckets = defaultdict(list)
     for f in tqdm(silver_files, desc="Bucketing"):
         meta = get_metadata(f)
@@ -110,31 +155,20 @@ def process_gold():
     
     for key in pbar:
         candidates = buckets[key]
-        n_total = len(candidates)
         
-        # [Anomaly 대응] Smart Safety Cap
-        if n_total > MAX_BUCKET_SIZE:
-            candidates.sort(key=lambda x: (x['last_price'] >= PENNY_STOCK_THRESHOLD, x['end_date'], x['count']), reverse=True)
-            vips = candidates[:MAX_BUCKET_SIZE]
-            others = candidates[MAX_BUCKET_SIZE:]
-            
-            pbar.set_description(f"Bucket {key} (Smart Cap: {n_total}->{MAX_BUCKET_SIZE})")
-            
-            for item in others:
-                shutil.copy2(item['path'], GOLD_DIR / f"{item['ticker']}.parquet")
-                success_cnt += 1
-            candidates = vips
-        else:
-            pbar.set_description(f"Bucket {key} ({n_total})")
-
-        candidates.sort(key=lambda x: (x['end_date'], x['count']), reverse=True)
+        # 중요도 순 정렬 (Count 많은 순, 종료일 늦은 순)
+        candidates.sort(key=lambda x: (x['count'], x['end_date']), reverse=True)
+        
         processed = set()
         n = len(candidates)
+        
+        pbar.set_description(f"Bucket {key} ({n})")
         
         for i in range(n):
             main = candidates[i]
             if main['ticker'] in processed: continue
             
+            # 동전주 필터링 (너무 싼 주식은 메인으로 쓰지 않음, 단 병합 대상으로는 가능)
             if main['last_price'] < PENNY_STOCK_THRESHOLD:
                 shutil.copy2(main['path'], GOLD_DIR / f"{main['ticker']}.parquet")
                 success_cnt += 1
@@ -142,26 +176,34 @@ def process_gold():
                 continue
 
             duplicates = []
+            
+            # 병합 후보 탐색
             for j in range(i+1, n):
                 sub = candidates[j]
                 if sub['ticker'] in processed: continue
                 
-                # 가격 차이 필터가 제거되어 상관계수 계산으로 진입함
-                if calculate_correlation_optimized(main, sub) > 0.99:
+                # [엄격한 검사 수행]
+                is_mergeable, _ = is_valid_merge_candidate(main, sub)
+                
+                if is_mergeable:
                     duplicates.append(sub)
                     processed.add(sub['ticker'])
                     dedup_cnt += 1
             
             if duplicates:
-                if stitch_and_save(main, duplicates, GOLD_DIR): success_cnt += 1
+                # 병합 실행
+                if stitch_and_save(main, duplicates, GOLD_DIR):
+                    success_cnt += 1
             else:
+                # 병합 대상 없으면 그냥 복사
                 shutil.copy2(main['path'], GOLD_DIR / f"{main['ticker']}.parquet")
                 success_cnt += 1
+                
             processed.add(main['ticker'])
             
         if n > 500: gc.collect()
 
-    print(f"  ✅ Gold 생성 완료 (저장: {success_cnt}, 병합: {dedup_cnt})")
+    print(f"  ✅ Gold 생성 완료 (저장: {success_cnt}, 병합됨: {dedup_cnt})")
 
 if __name__ == "__main__":
     process_gold()

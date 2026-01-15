@@ -31,4 +31,4 @@ class TrdAmount(BaseFeature):
 
 class FD_TrdAmount(BaseFeature):
     def compute(self, df: pd.DataFrame) -> pd.DataFrame:
-        return ((df['FD_Close'] + df['FD_High'] + df['FD_Low'] + df['FD_Open']) / 4 * df['FD_Volume']).rename("FD_TrdAmount")
+        return ((df['FD_Close'] + df['FD_High'] + df['FD_Low'] + df['FD_Open']) / 4 * df['Volume']).rename("FD_TrdAmount")
