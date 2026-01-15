@@ -7,27 +7,27 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache"
+
 class CacheManager:
     def __init__(self, cache_dir=CACHE_DIR):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get_cache_path(self, name):
-        # 파일이 아니라 '디렉토리'를 캐시 단위로 씁니다.
         return self.cache_dir / name
 
     def save(self, data, name):
         """
-        데이터를 Parquet 파일들로 쪼개서 저장 (The Crazy Method)
+        [Final Fix] Dynamic Type Checking
+        이름이 아니라 '실제 값의 크기'를 보고 float16/float32를 결정합니다.
         """
         path = self.get_cache_path(name)
         if path.exists():
             shutil.rmtree(path)
         path.mkdir(parents=True, exist_ok=True)
         
-        print(f"📦 [Cache] Saving '{name}' (Parquet Sharding Mode)...")
+        print(f"📦 [Cache] Saving '{name}' (Dynamic Type Check)...")
         
-        # 1. 메타데이터 저장 (Tickers, Dates)
         meta = {
             'tickers': data.get('tickers', []),
             'dates': [d.strftime('%Y-%m-%d') for d in data.get('dates', [])]
@@ -35,27 +35,38 @@ class CacheManager:
         with open(path / 'meta.json', 'w') as f:
             json.dump(meta, f)
 
-        # 2. DataFrame 저장 (Parquet + Zstd)
-        # Prices와 Features를 순회하며 각각 별도 파일로 저장
         for category in ['prices', 'features']:
             dct = data.get(category, {})
             save_dir = path / category
             save_dir.mkdir(exist_ok=True)
             
             for key, df in dct.items():
-                # [핵심 1] Feature는 Float16으로 압축 (용량 50% 절감)
-                # FD, Return, Correlation 등은 float16으로 충분함
-                # 단, Price(가격)와 Amount(거래대금)는 범위가 크므로 float32 유지
-                if category == 'features' or key not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'Trd_Amt', 'TrdAmount']:
-                    df_to_save = df.astype('float16')
-                else:
-                    df_to_save = df.astype('float32')
-                
-                # [핵심 2] Parquet + Zstd 압축 (시계열 압축 효율 극대화)
                 file_path = save_dir / f"{key}.parquet"
-                df_to_save.to_parquet(file_path, engine='pyarrow', compression='zstd')
                 
-        # 용량 확인
+                # 1. 가격 데이터는 무조건 안전하게 float32 (백테스트 핵심이므로)
+                if category == 'prices' or key in ['Open', 'High', 'Low', 'Close']:
+                    df.astype('float32').to_parquet(file_path, engine='pyarrow', compression='zstd')
+                    continue
+
+                # 2. Features는 값의 범위를 확인하여 동적 결정
+                # (1) 절대값의 최댓값 계산 (NaN/Inf 제외)
+                # numeric_only=True는 안전장치
+                try:
+                    # inf가 있으면 max가 inf가 됨 -> float32로 처리됨 (OK)
+                    max_val = df.abs().max(numeric_only=True).max()
+                except:
+                    max_val = float('inf') # 계산 실패시 안전하게 float32로
+
+                # (2) float16 한계(약 65,500) 체크
+                # 여유 있게 60,000 넘으면 float32로 전환
+                if pd.isna(max_val) or max_val > 60000:
+                    # 범위 초과 혹은 inf 포함 시
+                    # print(f"   🛡️ Using float32 for '{key}' (Max: {max_val:.1f})")
+                    df.astype('float32').to_parquet(file_path, engine='pyarrow', compression='zstd')
+                else:
+                    # 안전 범위 내라면 압축
+                    df.astype('float16').to_parquet(file_path, engine='pyarrow', compression='zstd')
+
         total_size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file()) / (1024*1024)
         print(f"   -> Save Complete. Total Size: {total_size:.2f} MB")
 
@@ -63,7 +74,6 @@ class CacheManager:
         path = self.get_cache_path(name)
         if not path.exists(): return None
         
-        # 시간 체크 (메타파일 기준)
         meta_path = path / 'meta.json'
         if not meta_path.exists(): return None
         
@@ -72,30 +82,22 @@ class CacheManager:
             print(f"⚠️ [Cache] '{name}' expired. Reloading...")
             return None
 
-        print(f"🚀 [Cache] Loading '{name}' (Parquet Shards)...")
+        print(f"🚀 [Cache] Loading '{name}'...")
         try:
-            # 1. 메타데이터 로드
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
             
             dates = [pd.Timestamp(d) for d in meta['dates']]
             tickers = meta['tickers']
             
-            data = {
-                'prices': {},
-                'features': {},
-                'dates': dates,
-                'tickers': tickers
-            }
+            data = {'prices': {}, 'features': {}, 'dates': dates, 'tickers': tickers}
             
-            # 2. Parquet 로드 (병렬 처리가 가능하지만, 여기선 단순 루프)
-            # 필요한 경우 여기서 특정 파일만 읽는 'Lazy Loading' 구현 가능
             for category in ['prices', 'features']:
                 target_dir = path / category
                 if target_dir.exists():
                     for f in target_dir.glob("*.parquet"):
                         key = f.stem
-                        # 읽을 때 다시 float32로 복원 (연산 안정성 위해)
+                        # 로드할 때는 연산 편의를 위해 float32로 통일
                         df = pd.read_parquet(f).astype('float32')
                         data[category][key] = df
             
