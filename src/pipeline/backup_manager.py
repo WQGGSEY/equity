@@ -64,7 +64,7 @@ def run_backup():
 
     # 3. 데이터 폴더 백업 (Bronze, Silver, Gold)
     # 데이터가 많으면 시간이 좀 걸리지만, 안전을 위해 필수입니다.
-    target_dirs = ["bronze", "silver", "gold"]
+    target_dirs = ["bronze"]
     
     for layer in target_dirs:
         src_path = DATA_DIR / layer

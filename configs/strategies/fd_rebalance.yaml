@@ -1,0 +1,10 @@
+base_config: "configs/base.yaml"
+
+experiment_name: "FD_TrdAmount_Rebalance_Base"
+strategy:
+  module: "src.backtest.strategies.market_buy"
+  class: "FDRebalanceStrategy"
+  params:
+    top_n: 10
+    ascending: false        # False: FD_TrdAmount가 큰 순서대로 (True면 작은 순서대로)
+    feature_name: "FD_TrdAmount"

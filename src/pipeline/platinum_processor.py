@@ -87,7 +87,10 @@ def process_single_ticker(file_path, feature_configs):
         
         for p in processors:
             try:
-                res = p['instance'].compute(universal_df)
+                # universal_df 대신 final_df를 전달하여 누적된 컬럼(FD_Close 등)을 참조 가능하게 함
+                res = p['instance'].compute(final_df) 
+                
+                # (병합 로직은 기존 유지)
                 if isinstance(res, pd.Series):
                     final_df[res.name] = res
                 elif isinstance(res, pd.DataFrame) and not res.empty:
