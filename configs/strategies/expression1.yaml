@@ -6,4 +6,4 @@ strategy:
   params:
     top_n: 20
     expressions:
-      - "0.5 * rank(ts2vec_manifold_0)"
+      - "vector_proj(rank(ts2vec_manifold_0), rank(ts2vec_manifold_1))"
