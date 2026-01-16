@@ -5,6 +5,18 @@ class Strategy:
         
     def initialize(self, market_data):
         self.md = market_data
+    
+    def get_price(self, date, ticker):
+        """
+        [Helper] 특정 날짜의 종가를 가져옴 (없으면 0.0)
+        """
+        if self.md and 'Close' in self.md.prices:
+            try:
+                # 데이터프레임에서 (날짜, 종목)으로 값 조회
+                return self.md.prices['Close'].loc[date, ticker]
+            except:
+                return 0.0
+        return 0.0
         
     def on_bar(self, date, universe_tickers, portfolio):
         """

@@ -93,38 +93,38 @@ def save_report(result_df, metrics, config, output_dir):
     summary_cols = [c for c in result_df.columns if c != 'positions']
     result_df[summary_cols].to_csv(output_dir / "daily_summary.csv")
     
-    # (B) 상세 내역 (Daily Positions)
-    pos_data = []
-    for date, row in result_df.iterrows():
-        equity = row['equity']
-        cash = row['cash']
-        cash_weight = cash / equity if equity > 0 else 0
+    # # (B) 상세 내역 (Daily Positions)
+    # pos_data = []
+    # for date, row in result_df.iterrows():
+    #     equity = row['equity']
+    #     cash = row['cash']
+    #     cash_weight = cash / equity if equity > 0 else 0
         
-        pos_data.append({
-            'Date': date,
-            'Ticker': 'CASH',
-            'Price': 1.0,
-            'Qty': cash, 
-            'Value': cash,
-            'Weight': cash_weight
-        })
+    #     pos_data.append({
+    #         'Date': date,
+    #         'Ticker': 'CASH',
+    #         'Price': 1.0,
+    #         'Qty': cash, 
+    #         'Value': cash,
+    #         'Weight': cash_weight
+    #     })
         
-        if isinstance(row['positions'], list):
-            for p in row['positions']:
-                pos_data.append({
-                    'Date': date,
-                    'Ticker': p['ticker'],
-                    'Price': p['price'],
-                    'Qty': p['qty'],
-                    'Value': p['value'],
-                    'Weight': p['weight']
-                })
+    #     if isinstance(row['positions'], list):
+    #         for p in row['positions']:
+    #             pos_data.append({
+    #                 'Date': date,
+    #                 'Ticker': p['ticker'],
+    #                 'Price': p['price'],
+    #                 'Qty': p['qty'],
+    #                 'Value': p['value'],
+    #                 'Weight': p['weight']
+    #             })
                 
-    pos_df = pd.DataFrame(pos_data)
-    if not pos_df.empty:
-        pos_df['Weight_Pct'] = (pos_df['Weight'] * 100).round(2)
-        pos_df.to_csv(output_dir / "daily_positions.csv", index=False)
-        print(f"📄 Positions saved to {output_dir / 'daily_positions.csv'}")
+    # pos_df = pd.DataFrame(pos_data)
+    # if not pos_df.empty:
+    #     pos_df['Weight_Pct'] = (pos_df['Weight'] * 100).round(2)
+    #     pos_df.to_csv(output_dir / "daily_positions.csv", index=False)
+    #     print(f"📄 Positions saved to {output_dir / 'daily_positions.csv'}")
 
     # 4. 차트 그리기
     plt.figure(figsize=(14, 8))

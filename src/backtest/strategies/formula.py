@@ -17,6 +17,7 @@ class FormulaStrategy(Strategy):
         self.signal_matrix = None
 
     def initialize(self, market_data):
+        self.md = market_data
         print("🧪 [Alpha Engine] Initializing Data Context...")
         
         # 1. 기본 가격 데이터 (Standard Context)

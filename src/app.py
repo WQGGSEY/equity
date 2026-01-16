@@ -55,7 +55,7 @@ with st.sidebar:
     end_date = st.date_input("End Date", pd.to_datetime("2023-12-31"))
     
     initial_cash = st.number_input("Initial Cash ($)", value=100_000, step=10_000)
-    top_n = st.slider("Top N Stocks", min_value=5, max_value=50, value=20)
+    top_n = st.slider("Top N Stocks", min_value=5, max_value=200, value=20)
     
     fee_rate = st.number_input("Fee Rate (%)", value=0.1, step=0.01) / 100
     slippage = st.number_input("Slippage (%)", value=0.1, step=0.01) / 100
