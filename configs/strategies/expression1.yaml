@@ -1,0 +1,9 @@
+base_config: "configs/base.yaml"
+experiment_name: "Hybrid_Alpha_Expression"
+strategy:
+  module: src.backtest.strategies.formula
+  class: FormulaStrategy
+  params:
+    top_n: 20
+    expressions:
+      - "0.5 * rank(ts2vec_manifold_0)"

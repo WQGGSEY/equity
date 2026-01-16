@@ -4,5 +4,5 @@ backtest:
   start_date: "2000-01-01"
   end_date: "2023-12-31"
   initial_cash: 100000000
-  fee_rate: 0.000
-  slippage_rate: 0.000
+  fee_rate: 0.0001
+  slippage_rate: 0.0002
