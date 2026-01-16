@@ -18,7 +18,14 @@ from src.backtest.engine import BacktestEngine
 from src.utils.config_loader import load_config, get_strategy_class
 
 def calculate_metrics(df, initial_cash):
-    # ... (기존과 동일)
+    # 빈 데이터프레임 방어 로직
+    if df.empty:
+        return {
+            'Total Return': 0.0, 'CAGR': 0.0, 'MDD': 0.0, 
+            'Sharpe Ratio': 0.0, 'Avg Daily Turnover': 0.0, 
+            'Final Equity': initial_cash, 'Trading Days': 0
+        }
+
     final_equity = df['equity'].iloc[-1]
     total_return = (final_equity / initial_cash) - 1
     
@@ -58,17 +65,17 @@ def save_report(result_df, metrics, config, output_dir):
     # 1. 텍스트 리포트 저장
     with open(output_dir / "report.txt", "w", encoding="utf-8") as f:
         f.write("="*40 + "\n")
-        f.write(f" Backtest Report (US Market)\n") # [Mod] 타이틀 변경
+        f.write(f" Backtest Report (US Market)\n") 
         f.write("="*40 + "\n")
         f.write(f"Experiment : {config.get('experiment_name', 'Unnamed')}\n")
-        f.write(f"Date Range : {result_df.index[0].date()} ~ {result_df.index[-1].date()}\n")
+        if not result_df.empty:
+            f.write(f"Date Range : {result_df.index[0].date()} ~ {result_df.index[-1].date()}\n")
         f.write("-" * 40 + "\n")
         f.write(f"Total Return : {metrics['Total Return']*100:6.2f} %\n")
         f.write(f"CAGR         : {metrics['CAGR']*100:6.2f} %\n")
         f.write(f"MDD          : {metrics['MDD']*100:6.2f} %\n")
         f.write(f"Sharpe Ratio : {metrics['Sharpe Ratio']:6.4f}\n")
         f.write(f"Avg Turnover : {metrics['Avg Daily Turnover']*100:6.2f} %\n")
-        # [Mod] KRW -> USD 변경, 소수점 2자리까지 표기
         f.write(f"Final Equity : $ {metrics['Final Equity']:,.2f} USD\n")
         f.write("="*40 + "\n")
         
@@ -78,6 +85,9 @@ def save_report(result_df, metrics, config, output_dir):
     with open(output_dir / "config_snapshot.yaml", "w", encoding="utf-8") as f:
         yaml.dump(config, f, allow_unicode=True)
         
+    if result_df.empty:
+        return
+
     # 3. CSV 저장
     # (A) 요약본
     summary_cols = [c for c in result_df.columns if c != 'positions']
@@ -94,7 +104,7 @@ def save_report(result_df, metrics, config, output_dir):
             'Date': date,
             'Ticker': 'CASH',
             'Price': 1.0,
-            'Qty': cash, # 소수점 가능하도록 변경
+            'Qty': cash, 
             'Value': cash,
             'Weight': cash_weight
         })
@@ -123,7 +133,7 @@ def save_report(result_df, metrics, config, output_dir):
     plt.plot(result_df.index, result_df['equity'], label='Equity', color='blue')
     plt.yscale('log')
     plt.title(f"Equity Curve (Log Scale): {config.get('experiment_name')}")
-    plt.ylabel("Equity (USD)") # [Mod] 라벨 변경
+    plt.ylabel("Equity (USD)") 
     plt.grid(True, alpha=0.3, which='both')
     plt.legend()
     
@@ -147,9 +157,22 @@ def main(config_path):
     md.load_all()
     
     bt_cfg = cfg['backtest']
-    # [Mod] 기본 초기 자금을 100,000 USD (약 10만불)로 변경
-    initial_cash = bt_cfg.get('initial_cash', 100_000) 
-    engine = BacktestEngine(md, start_date=bt_cfg.get('start_date'), end_date=bt_cfg.get('end_date'))
+    initial_cash = bt_cfg.get('initial_cash', 100_000)
+    
+    # [핵심 수정] Config에서 수수료와 슬리피지 읽어서 엔진에 전달!
+    fee_rate = bt_cfg.get('fee_rate', 0.0)
+    slippage = bt_cfg.get('slippage', 0.0)
+    total_cost_rate = fee_rate + slippage
+    
+    print(f"⚙️  Engine Settings: Fee={fee_rate*100:.3f}%, Slippage={slippage*100:.3f}% -> Total Cost={total_cost_rate*100:.3f}%")
+    
+    # 수정된 엔진에 fee_rate 전달
+    engine = BacktestEngine(
+        md, 
+        start_date=bt_cfg.get('start_date'), 
+        end_date=bt_cfg.get('end_date'),
+        fee_rate=total_cost_rate
+    )
     
     # 2. Strategy Logic
     strat_cfg = cfg['strategy']

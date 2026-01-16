@@ -8,8 +8,8 @@ strategy:
   module: "src.backtest.strategies.regression"
   class: "LongOnlySniperStrategy"
   params:
-    feature_col: "ts2vec_manifold_0"
-    target_col: "FD_Close"
+    feature_col: "FD_Close"
+    target_col: "FD_TrdAmount"
     lookback_window: 20
     top_n: 10
     hold_period: 10

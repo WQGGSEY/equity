@@ -19,8 +19,13 @@ class Portfolio:
         return val
 
 class BacktestEngine:
-    def __init__(self, market_data, start_date=None, end_date=None):
+    # [수정 1] __init__에서 fee_rate를 인자로 받도록 변경
+    def __init__(self, market_data, start_date=None, end_date=None, fee_rate=0.0):
         self.md = market_data
+        
+        # [수정 2] 수수료율 저장 (기본값 0.0)
+        self.fee_rate = fee_rate 
+        
         self.portfolio = None
         
         all_dates = self.md.dates
@@ -29,7 +34,6 @@ class BacktestEngine:
         self.sim_dates = all_dates
         self.universe_mask = self._precompute_universe()
         
-        # [NEW] VWAP 미리 계산 (O+H+L+C)/4
         print("📊 Pre-computing VWAP ((O+H+L+C)/4)...")
         # 데이터가 없는 경우 Close로 대체하거나 NaN 처리
         o = self.md.prices.get('Open', self.md.prices['Close'])
@@ -40,28 +44,35 @@ class BacktestEngine:
 
     def _precompute_universe(self):
         print("🌌 Pre-computing Dynamic Universe (Top 3000 Liquidity)...")
+        # Amount가 없으면 Close * Volume으로 대체
         amount = self.md.prices.get('Amount', self.md.prices['Close'] * self.md.prices['Volume'])
         rolling_amt = amount.rolling(window=20, min_periods=1).mean()
         rank_matrix = rolling_amt.rank(axis=1, ascending=False)
-        return (rank_matrix <= 3000)
+        
+        # [수정] 동전주 필터 추가 (1달러 미만 잡주 제외)
+        price_filter = (self.md.prices['Close'] > 1.0)
+        
+        # 랭킹 3000위 이내이면서 & 가격이 1달러 이상인 종목만 True
+        return (rank_matrix <= 3000) & price_filter
 
     def run(self, strategy, initial_cash=100_000_000):
         print(f"▶️ Running Strategy: {strategy.name} (Execution: Next Day VWAP)")
+        print(f"   (Settings) Fee Rate: {self.fee_rate * 100:.2f}%") # 확인용 로그 출력
+
         self.portfolio = Portfolio(initial_cash)
         strategy.initialize(self.md)
         
         last_valid_prices = {} 
         nan_duration = {}
         
-        # [핵심] 주문 보관함 (오늘 주문 -> 내일 체결)
         pending_orders = [] 
         
         for date in tqdm(self.sim_dates, desc="Simulating"):
-            # 1. 오늘의 데이터 (Signal용: Close, Execution용: VWAP)
+            # 1. 오늘의 데이터
             current_close = self.md.prices['Close'].loc[date]
-            current_vwap = self.vwap.loc[date] # 체결은 이걸로
+            current_vwap = self.vwap.loc[date] 
             
-            # 메타데이터 업데이트 (상폐 방지 로직 등)
+            # 메타데이터 업데이트
             for t in list(self.portfolio.holdings.keys()):
                 p = current_close.get(t, np.nan)
                 if np.isnan(p):
@@ -70,25 +81,20 @@ class BacktestEngine:
                     nan_duration[t] = 0
                     if p > 0: last_valid_prices[t] = p
 
-            # 2. [체결 단계] "어제 접수한 주문"을 "오늘의 VWAP"으로 체결
-            # (수수료 0.3% 적용)
+            # 2. 체결 단계
             daily_turnover = 0.0
             if pending_orders:
                 daily_turnover = self._execute_orders(pending_orders, current_vwap)
-                pending_orders = [] # 체결 완료 후 비움
+                pending_orders = [] 
 
-            # 3. [전략 실행 단계] "오늘의 종가(Close)"를 보고 신호 생성
+            # 3. 전략 실행 단계
             daily_mask = self.universe_mask.loc[date]
             valid_tickers = daily_mask[daily_mask].index.tolist()
             
-            # 전략에게는 'Close' 정보를 줌 (당일 판단)
             new_orders = strategy.on_bar(date, valid_tickers, self.portfolio)
-            
-            # [핵심] 주문을 바로 체결하지 않고 '내일'로 넘김
             pending_orders = new_orders
             
-            # 4. 포트폴리오 평가 (평가는 보수적으로 Close 기준 or VWAP 기준)
-            # 보통 자산 평가는 종가(Close)로 하는 것이 원칙
+            # 4. 포트폴리오 평가
             equity_val = self.portfolio.cash
             
             daily_positions = []
@@ -96,7 +102,7 @@ class BacktestEngine:
             for ticker, qty in self.portfolio.holdings.items():
                 price = current_close.get(ticker, np.nan)
                 
-                # 좀비 기업 처리 (5일 이상 거래 정지 시 0원)
+                # 상폐/거래정지 처리
                 if np.isnan(price):
                     if nan_duration.get(ticker, 0) > 5: price = 0.0 
                     else: price = last_valid_prices.get(ticker, 0.0)
@@ -126,8 +132,8 @@ class BacktestEngine:
         return pd.DataFrame(self.portfolio.history).set_index('date')
 
     def _execute_orders(self, orders, prices):
-        # 수수료 + 슬리피지 포함 0.3% (보수적)
-        fee_rate = 0.003
+        # [수정 3] 하드코딩 제거 -> self.fee_rate 사용
+        fee_rate = self.fee_rate
         total_traded = 0.0
         
         for order in orders:
@@ -135,7 +141,6 @@ class BacktestEngine:
             qty = order['quantity']
             action = order['action']
             
-            # 체결 가격은 VWAP
             price = prices.get(ticker, np.nan)
             
             if np.isnan(price) or price <= 0: continue
@@ -145,7 +150,7 @@ class BacktestEngine:
             if action == 'BUY':
                 cost = amt
                 fee = cost * fee_rate
-                # 미수 방지: 어제 주문 낼 때 현금 있었어도, 오늘 VWAP이 폭등해서 부족할 수 있음 체크
+                # 미수 방지
                 if self.portfolio.cash >= (cost + fee):
                     self.portfolio.cash -= (cost + fee)
                     self.portfolio.holdings[ticker] = self.portfolio.holdings.get(ticker, 0) + qty
