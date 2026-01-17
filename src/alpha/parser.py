@@ -1,62 +1,64 @@
-# src/alpha/parser.py
 import pandas as pd
-from src.alpha import ops
 import re
+from src.alpha import ops
 
 class AlphaParser:
     def __init__(self):
-        # ops.py에 있는 모든 함수를 가져와서 namespace로 만듦
+        # 1. ops.py 함수들 로드
         self.context = {name: getattr(ops, name) for name in dir(ops) if not name.startswith("_")}
         
-        # 2. [핵심] 예약어 리스트 초기화 (수식 분석 시 '함수'를 걸러내는 역할)
-        # ops.py에 있는 모든 함수명 + 파이썬 기본 키워드 등을 등록
+        # 2. 예약어 (함수명 등) - 피처 로딩 시 제외용
         self.reserved_keywords = set(self.context.keys())
-    
+
     def parse(self, expression: str, data_dict: dict) -> pd.DataFrame:
         """
-        expression: "rank(ts_mean(close, 20))" 같은 문자열
-        data_dict: {'close': close_df, 'volume': volume_df, ...}
+        [Multi-Statement Support]
+        세미콜론(;)으로 구분된 문장을 순차적으로 실행합니다.
+        마지막 문장의 결과값을 반환합니다.
+        
+        예: "X = FD_Close * 2; ts_rank(X, 10)"
         """
-        # 1. 데이터(변수)를 컨텍스트에 추가
         local_ctx = self.context.copy()
         local_ctx.update(data_dict)
         
+        # 1. 세미콜론으로 문장 분리
+        # (문자열 안의 세미콜론은 무시하는 등 복잡한 로직이 필요할 수 있으나, 여기선 단순 split 사용)
+        statements = [s.strip() for s in expression.split(';') if s.strip()]
+        
+        if not statements:
+            raise ValueError("빈 수식입니다.")
+
         try:
-            # 2. 문자열 수식 실행 (Vectorized Evaluation)
-            # eval("rank(close)", globals=local_ctx)
-            result = eval(expression, {"__builtins__": {}}, local_ctx)
-            return result
+            # 2. 마지막 문장을 제외한 앞부분은 '실행(exec)' -> 변수 정의용
+            for stmt in statements[:-1]:
+                exec(stmt, {"__builtins__": {}}, local_ctx)
+                
+            # 3. 마지막 문장은 '평가(eval)' -> 결과 반환용
+            final_expr = statements[-1]
+            return eval(final_expr, {"__builtins__": {}}, local_ctx)
+            
         except Exception as e:
-            raise ValueError(f"수식 파싱 오류: '{expression}' -> {e}")
-    
+            # 디버깅을 위해 어떤 부분에서 에러가 났는지 표시
+            raise ValueError(f"수식 실행 오류:\n수식: {expression}\n원인: {e}")
+
     def extract_needed_features(self, expressions: list) -> list:
         """
-        수식 리스트를 분석하여 로딩이 필요한 피처 파일명 리스트를 반환합니다.
-        예: ["rank(ts2vec_manifold_0)"] -> ["ts2vec_manifold_0"]
+        수식에서 필요한 피처(변수)를 추출합니다.
+        할당문 왼쪽의 변수(새로 정의된 변수)는 피처로 로딩하면 안 되지만,
+        로더가 '없는 파일'은 무시하므로 여기서는 단순하게 추출해도 괜찮습니다.
         """
         needed = set()
-        
-        # 변수명 추출 정규식 (문자로 시작, 숫자/언더바 포함 가능)
         token_pattern = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
 
         for expr in expressions:
-            # 1. 수식에서 단어들 추출
+            # 단순화를 위해 전체에서 단어 추출
             tokens = token_pattern.findall(expr)
-            
             for token in tokens:
-                # 소문자로 변환하여 비교 (파일명 매칭 유연성)
                 token_lower = token.lower()
-                
-                # 2. 예약어(함수명)나 기본 가격 데이터(OHLCV)는 제외
                 if token_lower in self.reserved_keywords:
                     continue
-                
-                # 3. 숫자로만 된 것은 제외 (이미 정규식에서 걸러지긴 함)
                 if token.isdigit():
                     continue
-
-                # 4. 살아남은 것은 외부 피처일 확률이 높음!
-                needed.add(token) # 원본 대소문자 유지 (파일명 매칭 위해)
-
-        # 리스트로 변환하여 반환
+                needed.add(token)
+                
         return list(needed)

@@ -4,9 +4,8 @@ strategy:
   module: src.backtest.strategies.formula
   class: FormulaStrategy
   params:
-    top_n: 10
     expressions:
       # - "if_else(ts_rank(ts_return(FD_Close, 21), 252) > 0.7, -ts_rank(ts_variance(FD_Close, 21), 252), 0)"
-      # - "if_else(ts_rank(ts_skewness(FD_Close, 21), 126) > 0.9, 1, 0)"
-      # - "if_else(ts_rank(ts_variance(ts_return(FD_Close, 1), 21), 126) > 0.8, 0, 1)"
-      - if_else(ts_corr(FD_Close, Volume, 20) < -0.5, 1, 0)
+      - "ts_backfill(if_else(ts_rank(ts_skewness(FD_Close, 21), 126) > 0.9, 1, 0), 252)"
+      # - "if_else(ts_rank(ts_variance(ts_return(FD_Close, 1), 21), 126) > 0.8, 1, -1)"
+      # - "0"

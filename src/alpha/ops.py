@@ -156,13 +156,28 @@ def df_or(X:pd.DataFrame, Y:pd.DataFrame):
     return pd.DataFrame(X.values | Y.values, index=X.index, columns=X.columns)
 
 
-def if_else(logic:pd.DataFrame, X:pd.DataFrame|int|float, Y:pd.DataFrame|int|float):
+def if_else(logic: pd.DataFrame, X: pd.DataFrame | int | float, Y: pd.DataFrame | int | float):
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :param Y: columns=Timeseries, index=Tickers Dataframe
-    :return: if logic is true, return X, otherwise return Y
+    [Robust if_else]
+    - logic이 NaN인 경우 False로 취급합니다. (데이터 부족 시 진입 방지)
     """
-    return pd.DataFrame(np.where(logic, X, Y), index = logic.index, columns=logic.columns)
+    # 1. logic이 DataFrame인 경우 NaN 채우기 (False 취급)
+    if isinstance(logic, pd.DataFrame):
+        logic = logic.fillna(False)
+    
+    # 2. np.where 사용
+    # broadcasting을 위해 values 사용 가능여부 확인
+    l_val = logic.values if isinstance(logic, pd.DataFrame) else logic
+    x_val = X.values if isinstance(X, pd.DataFrame) else X
+    y_val = Y.values if isinstance(Y, pd.DataFrame) else Y
+    
+    # DataFrame 복원 (인덱스/컬럼 보존)
+    # logic의 구조를 따름
+    if isinstance(logic, pd.DataFrame):
+        return pd.DataFrame(np.where(l_val, x_val, y_val), index=logic.index, columns=logic.columns)
+    else:
+        # logic이 스칼라인 경우 (드물지만)
+        return np.where(l_val, x_val, y_val)
 
 
 def ts_weighted_decay(X:pd.DataFrame, k=0.5):
@@ -189,7 +204,7 @@ def ts_mean(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: simple average of X days
     """
-    return X.rolling(window=d, axis=1).mean()
+    return X.rolling(window=d, axis=0).mean()
 
 
 def ts_co_kurtosis(X:pd.DataFrame, Y:pd.DataFrame, d:int):
@@ -203,7 +218,7 @@ def ts_co_kurtosis(X:pd.DataFrame, Y:pd.DataFrame, d:int):
     dev_y = ts_av_diff(Y, d)
     std_x = ts_std_dev(X, d)
     std_y = ts_std_dev(Y, d)
-    return (dev_x*(dev_y**3)).rolling(window=d, axis=1).mean()/(std_x*(std_y**3))
+    return (dev_x*(dev_y**3)).rolling(window=d, axis=0).mean()/(std_x*(std_y**3))
 
 
 def ts_covariance(X: pd.DataFrame, Y: pd.DataFrame, d: int) -> pd.DataFrame:
@@ -305,7 +320,7 @@ def ts_max(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: max value in d days
     """
-    return X.rolling(window=d, axis=1).max()
+    return X.rolling(window=d, axis=0).max()
 
 
 def ts_min(X:pd.DataFrame, d:int):
@@ -314,7 +329,7 @@ def ts_min(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: minimum value in d days
     """
-    return X.rolling(window=d, axis=1).min()
+    return X.rolling(window=d, axis=0).min()
 
 
 def ts_max_diff(X:pd.DataFrame, d:int):
@@ -341,7 +356,7 @@ def ts_median(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: median value in d days
     """
-    return X.rolling(window=d, axis=1).median()
+    return X.rolling(window=d, axis=0).median()
 
 
 def ts_std_dev(X:pd.DataFrame, d:int):
@@ -350,7 +365,7 @@ def ts_std_dev(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: standard deviation of X in d days
     """
-    return X.rolling(window=d, axis=1).std()
+    return X.rolling(window=d, axis=0).std()
 
 def ts_linear_decay(X:pd.DataFrame, d:int):
     """
@@ -358,7 +373,7 @@ def ts_linear_decay(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: linearly decayed value of X in d days
     """
-    return X.rolling(window=d, win_type='triang', axis=1).mean()
+    return X.rolling(window=d, win_type='triang', axis=0).mean()
 
 
 def ts_min_max_cps(X:pd.DataFrame, d:int, f=2):
@@ -552,7 +567,7 @@ def ts_product(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: timeseries production
     """
-    return X.rolling(window=d, axis=1).agg(lambda x: x.prod())
+    return X.rolling(window=d, axis=0).agg(lambda x: x.prod())
 
 
 def ts_returns(X:pd.DataFrame, d:int):
@@ -583,7 +598,7 @@ def ts_skewness(X:pd.DataFrame, d:int):
     """
     mean_x = ts_mean(X, d)
     std = ts_std_dev(X, d)
-    return (((X-mean_x) / std)**3).rolling(window=d, axis=1).mean()
+    return (((X-mean_x) / std)**3).rolling(window=d, axis=0).mean()
 
 
 def ts_kurtosis(X:pd.DataFrame, d:int):
@@ -594,7 +609,7 @@ def ts_kurtosis(X:pd.DataFrame, d:int):
     """
     mean_x = ts_mean(X, d)
     std = ts_std_dev(X, d)
-    return (((X-mean_x) / std)**4).rolling(window=d, axis=1).mean()
+    return (((X-mean_x) / std)**4).rolling(window=d, axis=0).mean()
 
 
 def ts_sum(X:pd.DataFrame, d:int):
@@ -604,7 +619,7 @@ def ts_sum(X:pd.DataFrame, d:int):
     :return: sum of X in d days
     """
     X = X.fillna(0)
-    return X.rolling(window=d, axis=1).sum()
+    return X.rolling(window=d, axis=0).sum()
 
 
 def ts_rank(X:pd.DataFrame, d:int):
@@ -613,7 +628,7 @@ def ts_rank(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: scaled ascending rank value from 0 to 1 in d days.
     """
-    return X.rolling(window=d, axis=1).rank(pct=True)
+    return X.rolling(window=d, axis=0).rank(pct=True)
 
 def ts_zscore(X:pd.DataFrame, d:int):
     """
