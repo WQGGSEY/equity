@@ -554,86 +554,6 @@ def ts_product(X:pd.DataFrame, d:int):
     """
     return X.rolling(window=d, axis=1).agg(lambda x: x.prod())
 
-def ts_regression(
-    X: pd.DataFrame,
-    Y: pd.DataFrame,
-    d: int,
-    rettype: int = 0
-) -> pd.DataFrame:
-    """
-    Rolling Window 단순 선형회귀 (Window 크기 = d) 후, 결과(Residual/Alpha/Beta/Y_hat/R^2)를 반환.
-
-    [수정사항]
-    - 결과 DataFrame의 columns를 원본 X와 동일하게 유지하되,
-      실제로 값이 계산되는 구간만 (d-1)번째 열부터 채움.
-      나머지는 NaN으로 유지.
-    """
-
-    X_values = X.values  # shape: (n_tickers, n_dates)
-    Y_values = Y.values
-    X = X.astype('float64')
-    Y = Y.astype('float64')
-    n_tickers, n_dates = X_values.shape
-    # np.lib.stride_tricks.sliding_window_view 를 통해
-    # 각 ticker별 (n_windows x d) 윈도우 추출
-    X_windows = np.lib.stride_tricks.sliding_window_view(
-        X_values, window_shape=d, axis=1
-    )
-    Y_windows = np.lib.stride_tricks.sliding_window_view(
-        Y_values, window_shape=d, axis=1
-    )
-
-    # n_windows = n_dates - d + 1
-    _, n_windows, _ = X_windows.shape
-    # Window별 합(ΣX, ΣY), 제곱합(ΣX^2), 곱합(ΣX·Y) 계산
-    sum_x = X_windows.sum(axis=2)
-    sum_y = Y_windows.sum(axis=2)
-    sum_xx = (X_windows ** 2).sum(axis=2)
-    sum_xy = (X_windows * Y_windows).sum(axis=2)
-    # Beta, Alpha 계산
-    # Beta = [d*Σ(XY) - ΣX·ΣY] / [d*Σ(X^2) - (ΣX)^2]
-    # Alpha = (ΣY - Beta·ΣX) / d
-    beta_numer = d * sum_xy - (sum_x * sum_y)
-    beta_denom = d * sum_xx - (sum_x ** 2)
-    beta_denom = np.where(beta_denom == 0, np.nan, beta_denom)  # 분모=0 방지
-    beta = beta_numer / beta_denom
-    alpha = (sum_y - beta * sum_x) / d
-    # 각 윈도우의 마지막 X, Y (즉 윈도우 끝날 때 기준값)
-    X_last = X_windows[:, :, -1]  # shape: (n_tickers, n_windows)
-    Y_last = Y_windows[:, :, -1]
-    Y_pred_last = alpha + beta * X_last
-    residuals_last = Y_last - Y_pred_last
-
-    # R^2 등 계산
-    if rettype == 4:
-        # R^2 = 1 - (SS_res / SS_tot)
-        mean_y = sum_y / d
-        SS_res = ((Y_windows - (alpha[:, :, None] + beta[:, :, None] * X_windows)) ** 2).sum(axis=2)
-        SS_tot = ((Y_windows - mean_y[:, :, None]) ** 2).sum(axis=2)
-        R2 = 1 - SS_res / SS_tot
-        data = R2
-    else:
-        if rettype == 0:
-            data = residuals_last
-        elif rettype == 1:
-            data = alpha
-        elif rettype == 2:
-            data = beta
-        elif rettype == 3:
-            data = Y_pred_last
-        else:
-            raise ValueError("Invalid rettype. Must be 0, 1, 2, 3, or 4.")
-
-    # 결과를 (tickers x n_windows) 형태로 만든 뒤,
-    # 원래 (tickers x n_dates) 크기 DataFrame에 매핑
-    window_end_indices = np.arange(d - 1, n_dates)  # 롤링 윈도우 끝나는 지점들
-    partial_df = pd.DataFrame(data, index=X.index, columns=X.columns[window_end_indices])
-    # 전체 컬럼 유지용 NaN DataFrame 생성
-    full_df = pd.DataFrame(np.nan, index=X.index, columns=X.columns)
-    # (d-1)번째 컬럼부터 값 대입
-    full_df.iloc[:, d - 1:] = partial_df.values
-    return full_df
-
 
 def ts_returns(X:pd.DataFrame, d:int):
     """
@@ -693,47 +613,7 @@ def ts_rank(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: scaled ascending rank value from 0 to 1 in d days.
     """
-    n_tickers, n_dates = X.shape
-    if d > n_dates:
-        raise ValueError("Window size d cannot be larger than the number of dates in X.")
-
-    X_values = X.values  # Shape: (n_tickers, n_dates)
-    n_windows = n_dates - d + 1
-
-    # Generate rolling windows over the columns (dates) for X
-    # X_windows shape: (n_tickers, n_windows, window)
-    X_windows = np.lib.stride_tricks.sliding_window_view(X_values, window_shape=d, axis=1)
-
-    # Reshape to (batch_size, window) for vectorized operations
-    batch_size = n_tickers * n_windows
-    X_windows_flat = X_windows.reshape(batch_size, d)
-
-    # Use pandas DataFrame for vectorized ranking with 'min' method
-    df_windows = pd.DataFrame(X_windows_flat)
-    # Compute ranks along the columns (axis=1)
-    df_ranks = df_windows.rank(axis=1, method='min', ascending=True)
-
-    # Extract the rank of the last value in each window
-    last_value_rank = df_ranks.iloc[:, -1].values  # Shape: (batch_size,)
-
-    # Scale ranks between 0 and 1, ensuring rational increments
-    scaled_ranks = (last_value_rank - 1) / (d - 1)
-
-    # Reshape to (n_tickers, n_windows)
-    scaled_ranks = scaled_ranks.reshape(n_tickers, n_windows)
-
-    # Prepare the columns corresponding to the end dates of each window
-    window_end_indices = np.arange(d - 1, n_dates)
-    columns = X.columns[window_end_indices]
-
-    # Create the result DataFrame with the calculated ranks
-    result_df = pd.DataFrame(scaled_ranks, index=X.index, columns=columns)
-
-    # Create a full DataFrame with NaN for initial periods where the window is incomplete
-    full_result = pd.DataFrame(np.nan, index=X.index, columns=X.columns)
-    full_result.iloc[:, d - 1:] = result_df.values
-
-    return full_result
+    return X.rolling(window=d, axis=1).rank(pct=True)
 
 def ts_zscore(X:pd.DataFrame, d:int):
     """

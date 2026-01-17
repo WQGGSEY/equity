@@ -7,6 +7,10 @@ class AlphaParser:
     def __init__(self):
         # ops.py에 있는 모든 함수를 가져와서 namespace로 만듦
         self.context = {name: getattr(ops, name) for name in dir(ops) if not name.startswith("_")}
+        
+        # 2. [핵심] 예약어 리스트 초기화 (수식 분석 시 '함수'를 걸러내는 역할)
+        # ops.py에 있는 모든 함수명 + 파이썬 기본 키워드 등을 등록
+        self.reserved_keywords = set(self.context.keys())
     
     def parse(self, expression: str, data_dict: dict) -> pd.DataFrame:
         """

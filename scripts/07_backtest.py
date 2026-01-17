@@ -16,6 +16,7 @@ from src.config import PLATINUM_FEATURES_DIR
 from src.backtest.loader import MarketData
 from src.backtest.engine import BacktestEngine
 from src.utils.config_loader import load_config, get_strategy_class
+from src.alpha.parser import AlphaParser
 
 def calculate_metrics(df, initial_cash):
     # 빈 데이터프레임 방어 로직
@@ -152,22 +153,52 @@ def main(config_path):
     print(f"📂 Loading Config: {config_path}")
     cfg = load_config(config_path)
     
-    # 1. Setup
+    # -----------------------------------------------------------
+    # [핵심 수정] 전략에 필요한 피처를 미리 분석하여 로더에 전달
+    # -----------------------------------------------------------
+    strat_cfg = cfg['strategy']
+    required_features = []
+    
+    # 1. 'expressions' 파라미터가 있다면 (FormulaStrategy 등) 파싱
+    if 'params' in strat_cfg and 'expressions' in strat_cfg['params']:
+        exprs = strat_cfg['params']['expressions']
+        if isinstance(exprs, str): exprs = [exprs]
+        
+        print(f"🔍 Analyzing Strategy Requirements...")
+        parser = AlphaParser()
+        try:
+            # 수식에서 변수명(피처) 추출
+            extracted = parser.extract_needed_features(exprs)
+            required_features.extend(extracted)
+        except Exception as e:
+            print(f"  ⚠️ Failed to parse expressions: {e}")
+
+    # 2. 명시적인 'required_features' 설정이 있다면 추가 (GoldenCross 등)
+    if 'required_features' in strat_cfg:
+        required_features.extend(strat_cfg['required_features'])
+        
+    # 중복 제거
+    required_features = sorted(list(set(required_features)))
+    print(f"🤖 [Auto-Detect] Loading Features: {required_features}")
+    
+    # -----------------------------------------------------------
+    # 1. Setup & Load
+    # -----------------------------------------------------------
     md = MarketData(PLATINUM_FEATURES_DIR)
-    md.load_all()
+    
+    # [핵심] 필요한 것만 골라서 로드 (8GB 램 생존 & 데이터 정렬 보장)
+    md.load_all(required_features=required_features)
     
     bt_cfg = cfg['backtest']
     initial_cash = bt_cfg.get('initial_cash', 100_000)
     
-    # [핵심 수정] Config에서 수수료와 슬리피지 읽어서 엔진에 전달!
     fee_rate = bt_cfg.get('fee_rate', 0.0)
     slippage = bt_cfg.get('slippage', 0.0)
     total_cost_rate = fee_rate + slippage
     universe_size = bt_cfg.get('universe_size', 3000)
     
-    print(f"⚙️  Engine Settings: Fee={fee_rate*100:.3f}%, Slippage={slippage*100:.3f}% -> Total Cost={total_cost_rate*100:.3f}%")
+    print(f"⚙️  Engine Settings: Fee={fee_rate*100:.3f}%, Slippage={slippage*100:.3f}%")
     
-    # 수정된 엔진에 fee_rate 전달
     engine = BacktestEngine(
         md, 
         start_date=bt_cfg.get('start_date'), 
@@ -177,7 +208,6 @@ def main(config_path):
     )
     
     # 2. Strategy Logic
-    strat_cfg = cfg['strategy']
     StrategyClass = get_strategy_class(strat_cfg['module'], strat_cfg['class'])
     strategy = StrategyClass(**strat_cfg['params'])
     

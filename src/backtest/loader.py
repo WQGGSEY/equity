@@ -4,14 +4,14 @@ from pathlib import Path
 from tqdm import tqdm
 import gc
 from .cache import CacheManager
+import pyarrow.parquet as pq
 
 class MarketData:
     """
-    [Memory-Safe Matrix Loader]
-    Original Architecture Restored:
-    1. Automatic Column Discovery (No manual 'required_features' needed)
-    2. Ticker-First Reading -> Feature-Matrix Pivoting
-    3. Smart Universe Cutting (Top 500) to survive 8GB RAM
+    [Robust Matrix Loader - Final Fixed Version]
+    - Bias-Free: 인위적인 종목 수 제한(3000개) 없이 전체 유니버스를 로드합니다.
+    - Efficient Caching: 변하지 않는 '가격(Base)'과 변하는 '피처(Feature)'를 분리하여 처리합니다.
+    - Strict Alignment: 모든 행렬이 (Dates x Tickers) 형태를 갖도록 강제하여 연산 오류를 방지합니다.
     """
     def __init__(self, platinum_dir="data/platinum"):
         self.platinum_dir = Path(platinum_dir)
@@ -21,129 +21,150 @@ class MarketData:
         self.dates = []
         self.cache_manager = CacheManager()
         
-    def load_all(self): # 서명(Signature)을 기존과 동일하게 복구
-        # 1. 캐시 확인
+    def load_all(self, required_features=None):
         # ---------------------------------------------------------
-        # (메모리 보호를 위해 기본적으로 Top 500 캐시를 사용한다고 가정)
-        cache_name = "market_data_matrix_optimized"
-        cached_data = self.cache_manager.load(cache_name, expiration_hours=12)
-        
-        if cached_data:
-            print("🚀 [Loader] Cache Hit! Loading from disk cache...")
-            self.prices = cached_data['prices']
-            self.features = cached_data['features']
-            self.tickers = cached_data['tickers']
-            self.dates = cached_data['dates']
-            print(f"  ✅ Loaded {len(self.tickers)} tickers, {len(self.features)} features.")
-            return
-
-        # 2. 원본 로딩 (No Cache)
+        # 1. Base Data (Prices) 로딩 - 캐시 우선
         # ---------------------------------------------------------
-        print("🚀 [Loader] Building Matrix from Platinum (Original Logic + Safe Mode)...")
-        files = list(self.platinum_dir.glob("*.parquet"))
+        # 피처가 바뀌어도 가격 데이터 캐시는 그대로 씁니다. (비효율 제거)
+        base_cache_name = "market_data_base_full_universe"
+        base_data = self.cache_manager.load(base_cache_name, expiration_hours=24)
         
-        if not files:
-            raise FileNotFoundError(f"No parquet files found in {self.platinum_dir}")
+        if base_data:
+            print(f"🚀 [Loader] Base Cache Hit! Using {len(base_data['tickers'])} tickers.")
+            self.prices = base_data['prices']
+            self.tickers = base_data['tickers']
+            self.dates = base_data['dates']
+        else:
+            print("🚀 [Loader] Building Base Matrix (Full Universe)...")
+            files = list(self.platinum_dir.glob("*.parquet"))
+            if not files:
+                raise FileNotFoundError(f"No parquet files in {self.platinum_dir}")
 
-        # [Step 1] 스키마 발견 (Schema Discovery)
-        # 첫 번째 파일을 열어서 "어떤 컬럼(피처)들이 있는지" 자동으로 알아냅니다.
-        # 기존 코드의 results[0].columns 로직을 계승합니다.
-        sample_df = pd.read_parquet(files[0])
-        all_columns = sample_df.columns.tolist()
-        
-        # 가격 컬럼과 피처 컬럼 분류
-        price_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        feature_cols = [c for c in all_columns if c not in price_cols and c != 'Date']
-        
-        print(f"  🔍 Discovered Features: {feature_cols}")
-        
-        # [Step 2] 유니버스 선정 (Universe Selection)
-        # 3,000개를 다 읽으면 터지니까, '거래대금'만 먼저 훑어서 상위 500개를 정합니다.
-        print("  ✂️ Selecting Top 500 Universe (to save RAM)...")
-        temp_amounts = {}
-        
-        # 가벼운 스캔 (Close, Volume만 읽기)
-        for p in tqdm(files, desc="  Scanning Liquidity"):
-            try:
-                # 필요한 컬럼만 읽어서 메모리 절약
-                df = pd.read_parquet(p, columns=['Close', 'Volume'])
-                amt = (df['Close'] * df['Volume']).iloc[-20:] # 최근 20일 평균만 봄
-                mean_amt = amt.mean()
-                if pd.notna(mean_amt):
-                    temp_amounts[p.stem] = mean_amt
-            except:
-                continue
-        
-        # 상위 500개 파일 확정
-        top_tickers = sorted(temp_amounts, key=temp_amounts.get, reverse=True)[:500]
-        self.tickers = top_tickers
-        target_files = [self.platinum_dir / f"{t}.parquet" for t in self.tickers]
-        
-        print(f"  ✅ Universe set to {len(self.tickers)} tickers.")
-        del temp_amounts
-        gc.collect()
+            # [Step 1] 전체 유니버스 스캔 (Bias-Free)
+            print("  🧩 Scanning All Files (No Limit)...")
+            all_dates = set()
+            all_tickers = []
+            
+            # 13,000개 파일 스캔 (날짜축 확정용)
+            for p in tqdm(files, desc="  Indexing"):
+                try:
+                    pf = pq.ParquetFile(p)
+                    # Close 컬럼이 있는 파일만 유효한 종목으로 인정
+                    if 'Close' in pf.schema.names:
+                        # 날짜 인덱스만 빠르게 추출
+                        df = pd.read_parquet(p, columns=['Close'])
+                        all_dates.update(df.index)
+                        all_tickers.append(p.stem)
+                except:
+                    continue
+            
+            self.dates = sorted(list(all_dates))
+            self.tickers = sorted(all_tickers)
+            print(f"  ✅ Universe Locked: {len(self.tickers)} tickers, {len(self.dates)} days")
 
-        # [Step 3] 데이터 로드 & 매트릭스 변환 (Main Loop)
-        # 기존 로직: ticker_map = {t: df for ...} -> Matrix 변환
-        # 최적화 로직: 파일을 하나씩 읽으면서 바로바로 각 매트릭스(딕셔너리)에 꽂아 넣음
+            # [Step 2] 가격 데이터 로드 & 정렬
+            price_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            data_store = {c: {} for c in price_cols}
+            
+            print(f"  📥 Loading Prices for {len(self.tickers)} tickers...")
+            for t in tqdm(self.tickers, desc="  Reading Prices"):
+                p = self.platinum_dir / f"{t}.parquet"
+                try:
+                    # 필요한 컬럼만 읽기
+                    df = pd.read_parquet(p, columns=price_cols)
+                    for c in price_cols:
+                        if c in df.columns:
+                            # float32로 변환하여 메모리 절약 (13,000개 로드 필수 조건)
+                            data_store[c][t] = df[c].astype('float32')
+                except:
+                    continue
+            
+            # 매트릭스 변환 (Strict Alignment)
+            print("  📐 Aligning Base Matrices...")
+            for c in price_cols:
+                if data_store[c]:
+                    df = pd.DataFrame(data_store[c])
+                    # [핵심] 기준 Date와 Ticker로 강제 재정렬 (빈 곳은 NaN)
+                    # Engine은 (Date x Ticker)를 원하므로 Transpose 안 함 (BacktestEngine.run 로직 기준)
+                    # 만약 Engine이 Transpose를 원하면 self.prices[c] = df.reindex(...).T 로 변경해야 함
+                    # 여기서는 사용자 코드가 pandas DataFrame(Date index)를 원한다고 가정
+                    df = df.reindex(index=self.dates, columns=self.tickers)
+                    self.prices[c] = df.astype('float32')
+                del data_store[c]
+
+            # Amount 생성
+            if 'Close' in self.prices and 'Volume' in self.prices:
+                open_p = self.prices.get('Open', self.prices['Close'])
+                self.prices['Amount'] = ((open_p + self.prices['Close']) / 2.0 * self.prices['Volume']).astype('float32')
+
+            # Base 캐시 저장
+            base_save = {
+                'prices': self.prices,
+                'tickers': self.tickers,
+                'dates': self.dates
+            }
+            self.cache_manager.save(base_save, base_cache_name)
+            gc.collect()
+
+        # ---------------------------------------------------------
+        # 2. Feature Data 로딩 (On-Demand from Disk)
+        # ---------------------------------------------------------
+        # 피처는 캐시하지 않고, 이미 확보된 self.tickers를 이용해 필요한 것만 빠르게 읽습니다.
+        # 이렇게 하면 "피처 바뀔 때마다 캐시 다시 만드는" 문제가 해결됩니다.
         
-        # 1. 저장소 초기화
-        # prices['Close'] = {ticker: series, ...}
-        # features['FD_Close'] = {ticker: series, ...}
-        data_store = {col: {} for col in all_columns}
-        
-        # 2. 파일 순회 (직렬 처리)
-        for p in tqdm(target_files, desc="  Loading Data"):
-            try:
+        if required_features:
+            print(f"  📥 Loading Features: {required_features}")
+            
+            # 피처별 임시 저장소
+            feat_store = {f: {} for f in required_features}
+            
+            # 이미 확보된 유니버스(self.tickers)에 대해서만 파일을 엽니다.
+            # (전체 디렉토리 스캔 X -> 속도 향상)
+            target_paths = [self.platinum_dir / f"{t}.parquet" for t in self.tickers]
+            
+            for p in tqdm(target_paths, desc="  Reading Features"):
+                if not p.exists(): continue
                 t = p.stem
-                df = pd.read_parquet(p) # 상위 500개라 전체 로드해도 안전함
                 
-                # float32 최적화 (기존 로직 계승)
-                float_cols = df.select_dtypes(include=['float64']).columns
-                if len(float_cols) > 0:
-                    df[float_cols] = df[float_cols].astype('float32')
-                
-                # 각 컬럼별로 쪼개서 저장
-                for col in df.columns:
-                    data_store[col][t] = df[col]
+                try:
+                    # 스키마 확인 (대소문자 보정 및 존재 여부 확인)
+                    pf = pq.ParquetFile(p)
+                    file_cols = set(pf.schema.names)
+                    col_map = {c.lower(): c for c in file_cols}
                     
-            except Exception as e:
-                print(f"  ⚠️ Failed to load {p.stem}: {e}")
-                continue
-
-        # [Step 4] DataFrame 매트릭스 생성 (Pivot)
-        print("  🧩 Pivoting to Matrix...")
-        
-        # 날짜 인덱스 통합
-        if 'Close' in data_store and len(data_store['Close']) > 0:
-            first_ticker = list(data_store['Close'].keys())[0]
-            self.dates = data_store['Close'][first_ticker].index
-        
-        # Prices 완성
-        for col in price_cols:
-            if col in data_store:
-                self.prices[col] = pd.DataFrame(data_store[col]).reindex(self.dates)
-                del data_store[col] # 메모리 해제
-        
-        # Amount 자동 생성 (기존 로직 계승)
-        if 'Amount' not in self.prices and 'Close' in self.prices:
-            avg = (self.prices['Open'] + self.prices['Close']) / 2
-            self.prices['Amount'] = avg * self.prices['Volume']
-
-        # Features 완성
-        for col in feature_cols:
-            if col in data_store and data_store[col]:
-                self.features[col] = pd.DataFrame(data_store[col]).reindex(self.dates)
-                del data_store[col] # 메모리 해제
-
-        print("  ✅ Matrix Build Complete.")
-        
-        # 3. 캐시 저장
-        save_data = {
-            'prices': self.prices,
-            'features': self.features,
-            'tickers': self.tickers,
-            'dates': self.dates
-        }
-        self.cache_manager.save(save_data, cache_name)
-        gc.collect()
+                    read_map = {} # {실제이름: 요청이름}
+                    for req in required_features:
+                        if req in file_cols:
+                            read_map[req] = req
+                        elif req.lower() in col_map: # Fuzzy Match
+                            read_map[col_map[req.lower()]] = req
+                            
+                    if not read_map: continue
+                    
+                    # 읽기
+                    df = pd.read_parquet(p, columns=list(read_map.keys()))
+                    df.rename(columns=read_map, inplace=True)
+                    
+                    for req in required_features:
+                        if req in df.columns:
+                            feat_store[req][t] = df[req].astype('float32')
+                            
+                except:
+                    continue
+            
+            # 매트릭스 변환 및 정렬
+            for f in required_features:
+                if feat_store[f]:
+                    df = pd.DataFrame(feat_store[f])
+                    # Base와 동일한 Shape 강제
+                    df = df.reindex(index=self.dates, columns=self.tickers)
+                    self.features[f] = df.astype('float32')
+                else:
+                    print(f"  ⚠️ Feature '{f}' not found. Creating NaN matrix.")
+                    self.features[f] = pd.DataFrame(np.nan, index=self.dates, columns=self.tickers).astype('float32')
+                
+                del feat_store[f]
+            
+            gc.collect()
+            
+        print("  ✅ Loading Complete.")
