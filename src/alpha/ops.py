@@ -162,7 +162,7 @@ def if_else(logic:pd.DataFrame, X:pd.DataFrame|int|float, Y:pd.DataFrame|int|flo
     :param Y: columns=Timeseries, index=Tickers Dataframe
     :return: if logic is true, return X, otherwise return Y
     """
-    return pd.DataFrame(np.where(logic, X, Y), index=X.index, columns=X.columns)
+    return pd.DataFrame(np.where(logic, X, Y), index = logic.index, columns=logic.columns)
 
 
 def ts_weighted_decay(X:pd.DataFrame, k=0.5):
