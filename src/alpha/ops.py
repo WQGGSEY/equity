@@ -284,7 +284,7 @@ def ts_ema(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: exponential moving average of X
     """
-    return X.ewm(span=d, axis=1).mean()
+    return X.ewm(span=d, axis=0).mean()
 
 
 def ts_delay(X:pd.DataFrame, d:int):
@@ -293,7 +293,7 @@ def ts_delay(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: value before d days
     """
-    return X.shift(d, axis=1).fillna(0)
+    return X.shift(d, axis=0).fillna(0)
 
 
 def ts_delta(X:pd.DataFrame, d:int):
@@ -330,6 +330,21 @@ def ts_min(X:pd.DataFrame, d:int):
     :return: minimum value in d days
     """
     return X.rolling(window=d, axis=0).min()
+
+def ts_argmax(X: pd.DataFrame, d: int) -> pd.DataFrame:
+    """
+    [Fixed] 윈도우 내 최대값이 위치한 '거리(Lag)'를 반환
+    예: 오늘이 최대면 0, 어제가 최대면 1 ...
+    """
+    # rolling apply는 느리지만 argmax는 numpy 최적화가 어려움
+    # (d - 1) - argmax (argmax는 윈도우 시작 기준 인덱스이므로)
+    return X.rolling(d).apply(lambda x: (d - 1) - np.argmax(x), raw=True)
+
+def ts_argmin(X: pd.DataFrame, d: int) -> pd.DataFrame:
+    """
+    [Fixed] 윈도우 내 최소값이 위치한 '거리(Lag)'를 반환
+    """
+    return X.rolling(d).apply(lambda x: (d - 1) - np.argmin(x), raw=True)
 
 
 def ts_max_diff(X:pd.DataFrame, d:int):
@@ -405,84 +420,19 @@ def ts_vector_neut(X: pd.DataFrame, Y: pd.DataFrame, d: int):
 
 def ts_vector_proj(X: pd.DataFrame, Y: pd.DataFrame, d: int) -> pd.DataFrame:
     """
-    Rolling(창길이 = d) 기반의 '벡터 투영' 함수를 날짜별로 계산하여 반환.
-    
-    각 (티커 i, 날짜 t)에 대해:
-      1) 최근 d일치 (t-d+1 ~ t)의 X[i], Y[i]를 각각 추출
-      2) dot_xy = Σ(X[i,τ]*Y[i,τ]) ,  dot_yy = Σ(Y[i,τ]^2)
-      3) ratio = dot_xy / dot_yy  (단, dot_yy=0이면 ratio=0)
-      4) 최종 ts_vector_proj(i,t) = ratio * Y[i, t]
-    
-    반환 DataFrame은 X와 동일한 인덱스/컬럼 크기를 가지며,
-    첫 (d-1)일은 계산 불가하므로 NaN이 됩니다.
-    
-    Parameters
-    ----------
-    X : pd.DataFrame
-        shape = [tickers x dates]
-    Y : pd.DataFrame
-        shape = [tickers x dates]
-    d : int
-        Rolling 윈도우 길이 (일 수)
-    
-    Returns
-    -------
-    proj_df : pd.DataFrame
-        shape = [tickers x dates], 첫 (d-1) 열은 NaN, 
-        그 뒤는 위 벡터투영 계산 결과.
+    [Optimized & Safe]
+    X와 Y의 시계열(axis=0) 롤링 벡터 투영을 계산합니다.
     """
-    # 0) 기본 정보
-    tickers = X.index
-    dates   = X.columns
-    n_tickers, n_dates = X.shape
+    # 1. 내적 계산 (롤링 합) - axis=0 자동 적용
+    dot_xy = (X * Y).rolling(window=d, min_periods=max(1, d // 2)).sum()
+    # dot_yy = (Y * Y).rolling(window=d, min_periods=max(1, d // 2)).sum()
+    dot_xx = (X * X).rolling(window=d, min_periods=max(1, d // 2)).sum()
     
-    # (에러 처리) d가 전체 날짜 수보다 클 경우
-    if d > n_dates:
-        raise ValueError(f"Window size d={d} is larger than number of columns={n_dates}.")
-
-    # 1) values로 변환
-    X_val = X.values  # shape=(n_tickers, n_dates)
-    Y_val = Y.values
-
-    # 2) rolling window를 위한 sliding_window_view
-    #    X_rolled: shape=(n_tickers, n_windows, d)
-    #    n_windows = n_dates - d + 1
-    X_rolled = np.lib.stride_tricks.sliding_window_view(
-        X_val, window_shape=d, axis=1
-    )
-    Y_rolled = np.lib.stride_tricks.sliding_window_view(
-        Y_val, window_shape=d, axis=1
-    )
-    # n_windows = n_dates - d + 1
-    _, n_windows, _ = X_rolled.shape
-
-    # 3) 각 윈도우에 대해 dot_xy, dot_yy 계산
-    #    dot_xy[i, w] = Σ_{k=0..d-1} X_rolled[i,w,k] * Y_rolled[i,w,k]
-    dot_xy = (X_rolled * Y_rolled).sum(axis=2)  # shape=(n_tickers, n_windows)
-    dot_yy = (Y_rolled ** 2).sum(axis=2)
-
-    # ratio = dot_xy / dot_yy (단, dot_yy=0이면 0 처리)
-    ratio = np.divide(
-        dot_xy, dot_yy, out=np.zeros_like(dot_xy), where=(dot_yy != 0)
-    )
-
-    # 4) 윈도우의 마지막 날짜(= t)에서 Y[i,t] * ratio
-    #    Y_rolled[:, w, -1] = 윈도우 마지막 칸(=t일)에서의 Y
-    y_last = Y_rolled[:, :, -1]         # shape=(n_tickers, n_windows)
-    proj_rolled = ratio * y_last       # shape=(n_tickers, n_windows)
-
-    # 5) proj_rolled를 (n_tickers x n_windows) -> (n_tickers x n_dates)로 매핑
-    #    윈도우 끝나는 날짜 인덱스: range(d-1, n_dates)
-    window_end_idx = np.arange(d-1, n_dates)
+    # 2. 비율 계산 (0 나누기 방지)
+    ratio = dot_xy / dot_xx.replace(0, np.nan)
     
-    # 일단 partial_df를 만든 뒤, 나머지는 NaN
-    partial_df = pd.DataFrame(proj_rolled, index=tickers, columns=dates[window_end_idx])
-    proj_df = pd.DataFrame(np.nan, index=tickers, columns=dates)
-    
-    # (d-1)번째 열부터 partial_df 값을 대입
-    proj_df.iloc[:, d-1:] = partial_df.values
-
-    return proj_df
+    # 3. 투영 벡터의 현재 시점 값 반환
+    return ratio * X
 
 
 def ts_backfill(X:pd.DataFrame, d:int):
@@ -491,75 +441,105 @@ def ts_backfill(X:pd.DataFrame, d:int):
     :param d: lookback days
     :return: backfilled days
     """
-    return X.fillna(method='ffill', axis=1, limit=d)
+    return X.fillna(method='ffill', axis=0, limit=d)
 
-def ts_poly_regression(
-    X: pd.DataFrame,
-    Y: pd.DataFrame,
-    d: int,
-    k: int
-) -> pd.DataFrame:
+def ts_poly_regression(Y: pd.DataFrame, X: pd.DataFrame, d: int, k: int = 2) -> pd.DataFrame:
     """
-    Rolling Window 다항(Polynomial) 회귀 (차수=k, Window 크기=d) 후,
-    해당 윈도우의 '마지막 시점'에서의 잔차(Residual)를 반환.
-
-    [수정사항]
-    - 결과 DataFrame의 columns를 원본 X와 동일하게 유지하되,
-      실제 계산 구간만 (d-1)번째 열부터 값을 넣고 나머지는 NaN 처리.
+    [Memory Optimized] Rolling Polynomial Regression
+    Model: Y = Beta_0 + Beta_1 * X + ... + Beta_k * X^k
+    
+    * Sliding Window 대신 'Normal Equation(최소자승법)'의 합산 공식을 사용합니다.
+    * 메모리 효율을 위해 종목(Column)별로 순회하며 계산합니다.
+    * axis=0 (Time-series) 방향으로 올바르게 작동합니다.
+    
+    Returns:
+        Residuals (Y - Fitted) at the last point of the window.
     """
-
-    X_values = X.values
-    Y_values = Y.values
-    n_tickers, n_dates = X_values.shape
-
-    # 윈도우 생성
-    X_windows = np.lib.stride_tricks.sliding_window_view(
-        X_values, window_shape=d, axis=1
-    )
-    Y_windows = np.lib.stride_tricks.sliding_window_view(
-        Y_values, window_shape=d, axis=1
-    )
-    _, n_windows, _ = X_windows.shape
-    batch_size = n_tickers * n_windows
-
-    # 2D로 펼쳐서 (batch_size, d)
-    X_windows_flat = X_windows.reshape(batch_size, d)
-    Y_windows_flat = Y_windows.reshape(batch_size, d)
-
-    # 차수(k)에 따른 basis matrix
-    powers = np.arange(k + 1)  # 0,1,2,...k
-    X_design_flat = X_windows_flat[:, :, None] ** powers  # (batch_size, d, k+1)
-
-    # (X^T X), (X^T Y) 계산
-    XtX = np.einsum('bwd,bwe->bde', X_design_flat, X_design_flat)
-    Xty = np.einsum('bwd,bw->bd', X_design_flat, Y_windows_flat)
-
-    # (XtX)^+ * (X^T Y)
-    XtX_inv = safe_pinv(XtX)
-    Beta = np.einsum('bde,bd->be', XtX_inv, Xty)  # (batch_size, k+1)
-
-    # 예측값
-    Beta_expanded = Beta[:, None, :]
-    Y_pred_flat = np.einsum('bwd,bnd->bw', X_design_flat, Beta_expanded)
-    Residuals_flat = Y_windows_flat - Y_pred_flat
-    # shape 복원
-    Residuals = Residuals_flat.reshape(n_tickers, n_windows, d)
-    # 각 윈도우 마지막 시점의 Residual
-    Residuals_last = Residuals[:, :, -1]
-
-    # 롤링 윈도우 끝나는 날짜 인덱스
-    window_end_indices = np.arange(d - 1, n_dates)
-    partial_df = pd.DataFrame(
-        Residuals_last,
-        index=X.index,
-        columns=X.columns[window_end_indices]
-    )
-
-    # 전체 컬럼(NaN) df 생성 후, 해당 구간만 채움
-    full_df = pd.DataFrame(np.nan, index=X.index, columns=X.columns)
-    full_df.iloc[:, d - 1:] = partial_df.values
-
-    return full_df
+    # 1. 결과 담을 그릇 (모두 NaN으로 초기화)
+    residuals = pd.DataFrame(np.nan, index=Y.index, columns=Y.columns)
+    
+    # 2. X의 거듭제곱 미리 계산 (Powers) -> [1, X, X^2, ... X^2k]
+    #    Normal Equation을 풀기 위해 필요한 모든 항을 준비합니다.
+    #    메모리 절약을 위해 필요한 순간에 계산할 수도 있지만, 속도를 위해 미리 계산합니다.
+    #    X가 너무 크면 overflow 위험이 있으니 주의 (보통 Returns나 Z-score 사용 권장)
+    X_powers = [X.pow(i) for i in range(2 * k + 1)]
+    
+    # 3. Y와 X거듭제곱의 곱 미리 계산 -> [Y, Y*X, Y*X^2, ... Y*X^k]
+    YX_powers = [Y * X.pow(i) for i in range(k + 1)]
+    
+    # 4. 종목별 순회 (Vectorized over Time, Looped over Tickers)
+    #    3000개 종목을 한번에 3차원 배열로 만들면 메모리가 터지므로, 하나씩 처리합니다.
+    common_cols = Y.columns.intersection(X.columns)
+    
+    for col in common_cols:
+        try:
+            # (1) 해당 종목의 데이터 추출 (Series)
+            #     d일 롤링 합(Sum)을 구합니다. 이것이 곧 Matrix A와 Vector b의 성분이 됩니다.
+            #     min_periods를 설정하여 데이터가 조금 부족해도 계산되게 함.
+            S = [xp[col].rolling(window=d, min_periods=d//2).sum().values for xp in X_powers]
+            V = [yxp[col].rolling(window=d, min_periods=d//2).sum().values for yxp in YX_powers]
+            
+            # (2) 각 시점(t)별 Linear System 구성 (A * beta = b)
+            #     A[t] = [[Sum(1), Sum(X), ...], [Sum(X), Sum(X^2), ...], ...]
+            #     b[t] = [Sum(Y), Sum(YX), ...]
+            
+            T_len = len(Y)
+            
+            # A행렬 구성 (T x k+1 x k+1)
+            # 예: k=2이면 3x3 행렬. 
+            # Row 0: S[0], S[1], S[2]
+            # Row 1: S[1], S[2], S[3]
+            # Row 2: S[2], S[3], S[4]
+            A = np.zeros((T_len, k+1, k+1))
+            for i in range(k + 1):
+                for j in range(k + 1):
+                    A[:, i, j] = S[i + j]
+            
+            # b벡터 구성 (T x k+1)
+            b = np.zeros((T_len, k + 1))
+            for i in range(k + 1):
+                b[:, i] = V[i]
+            
+            # Ridge 추가 (Singular Matrix 방지)
+            epsilon = 1e-6
+            indices = np.arange(k + 1)
+            A[:, indices, indices] += epsilon
+            
+            # (3) 행렬 풀이 (Vectorized Solver)
+            #     np.linalg.solve는 (N, M, M) 형태의 input을 받아 (N, M) 해를 반환합니다.
+            #     유효하지 않은 데이터(NaN)가 있으면 에러나므로, NaN 마스크 처리 필요하지만
+            #     속도를 위해 try-except나 np.nan_to_num 활용
+            
+            # NaN이 있는 행은 계산 불가 -> 0으로 채우고 나중에 다시 NaN 처리
+            valid_mask = ~np.isnan(A).any(axis=(1, 2)) & ~np.isnan(b).any(axis=1)
+            
+            betas = np.zeros((T_len, k + 1))
+            
+            if np.any(valid_mask):
+                betas[valid_mask] = np.linalg.solve(A[valid_mask], b[valid_mask])
+            
+            # (4) 잔차 계산 (Residuals)
+            #     Res = Y - (Beta0 + Beta1*X + Beta2*X^2 + ...)
+            #     현재 시점의 X값(X[col])을 사용
+            x_vals = X[col].values
+            y_vals = Y[col].values
+            y_pred = np.zeros(T_len)
+            
+            for i in range(k + 1):
+                y_pred += betas[:, i] * (x_vals ** i)
+                
+            res = y_vals - y_pred
+            
+            # 유효하지 않았던 구간은 다시 NaN 처리
+            res[~valid_mask] = np.nan
+            
+            residuals[col] = res
+            
+        except Exception:
+            # Singular matrix 등 에러 발생 시 해당 종목은 Pass
+            continue
+            
+    return residuals
 
 def ts_product(X:pd.DataFrame, d:int):
     """
@@ -655,44 +635,63 @@ def vector_proj(X:pd.DataFrame, Y:pd.DataFrame):
     :return: project X to Y
     """
     # calculate [X1^TY1 X2^%Y2 ... XN^TYN]
-    dot_xy = (X * Y).sum(axis=0)  # X dot Y
-    dot_yy = (Y * Y).sum(axis=0)  # Y dot Y
+    dot_xy = (X * Y).sum(axis=1)  # X dot Y
+    dot_yy = (Y * Y).sum(axis=1)  # Y dot Y
 
     # 혹시 분모가 0인 날짜가 있을 수도 있으니 처리
     ratio = dot_xy / dot_yy
     ratio = ratio.replace([np.inf, -np.inf], 0).fillna(0)
 
     # ratio를 각 컬럼에 브로드캐스팅
-    proj = Y.multiply(ratio, axis=1)
+    proj = Y.multiply(ratio, axis=0)
     return proj
 
 
-def regression_neut(X:pd.DataFrame, Y:pd.DataFrame):
+def regression_neut(X: pd.DataFrame, Y: pd.DataFrame) -> pd.DataFrame:
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :param Y: columns=Timeseries, index=Tickers Dataframe
-    :return: Y - (a+bX)
+    [Cross-sectional Regression Neutralization]
+    매일매일 Y = alpha + beta * X 회귀분석을 수행하고 잔차(Residual)를 반환
+    Residual = Y - (alpha + beta * X)
     """
-    X, Y = X.fillna(0), Y.fillna(0)
-    X, Y = X.replace([np.inf, -np.inf], 0), Y.replace([np.inf, -np.inf], 0)
+    # 1. Beta = Cov(X, Y) / Var(X)  (Cross-sectional)
+    #    Cov(X, Y) = E[XY] - E[X]E[Y]
+    #    여기서 E[]는 횡단면 평균(mean(axis=1))
+    
+    mean_x = X.mean(axis=1)
+    mean_y = Y.mean(axis=1)
+    mean_xy = (X * Y).mean(axis=1)
+    mean_x2 = (X * X).mean(axis=1)
+    
+    cov_xy = mean_xy - mean_x * mean_y
+    var_x = mean_x2 - mean_x * mean_x
+    
+    beta = cov_xy / var_x.replace(0, np.nan)
+    
+    # 2. Alpha = Mean(Y) - Beta * Mean(X)
+    alpha = mean_y - beta * mean_x
+    
+    # 3. Residual = Y - (Alpha + Beta * X)
+    #    Broadcasting 주의: alpha, beta는 Series(Date)
+    term1 = X.mul(beta, axis=0) # Beta * X
+    term2 = term1.add(alpha, axis=0) # Alpha + Beta * X
+    
+    return Y.sub(term2).fillna(0.0)
 
-    inv = safe_pinv(np.dot(X.T, X))
-    projection_matrix = np.dot(inv, X.T)
-    projection_matrix = np.dot(X, projection_matrix)
-    pred_y = np.dot(projection_matrix, Y)
-    return pd.DataFrame(Y - pred_y, index=X.index, columns=X.columns)
 
-
-def scale_down(X:pd.DataFrame):
+def scale_down(X: pd.DataFrame) -> pd.DataFrame:
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :return: scale down X from 0 to 1 for each day
+    [Cross-sectional Min-Max Scale]
+    (Value - DailyMin) / (DailyMax - DailyMin) -> 0~1 범위로 변환
     """
-    min_x = X.min()
-    max_x = X.max()
-    df = (X-min_x) / (max_x - min_x)
-    df = df.fillna(0)
-    return df
+    daily_min = X.min(axis=1)
+    daily_max = X.max(axis=1)
+    
+    denom = daily_max - daily_min
+    
+    # 분모 0 방지
+    denom = denom.replace(0, np.nan)
+    
+    return X.sub(daily_min, axis=0).div(denom, axis=0).fillna(0.0)
 
 def arc_sin(X:pd.DataFrame):
     """
@@ -740,515 +739,194 @@ def rank(X:pd.DataFrame):
     :param X: columns=Timeseries, index=Tickers Dataframe
     :return: scaled ascending rank value from 0 to 1 in the universe
     """
-    rank = X.rank(axis=0, method='min', ascending=True)
+    rank = X.rank(axis=1, method='min', ascending=True)
     return scale_down(rank)
 
 
-def zscore(X:pd.DataFrame):
+def zscore(X: pd.DataFrame) -> pd.DataFrame:
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :return: zscore in the universe
+    [Cross-sectional Z-Score]
+    (Value - DailyMean) / DailyStd
     """
-    col_mean = X.fillna(0).mean(axis=0)
-    col_std = X.fillna(0).std(axis=0)
+    # 1. 일별 평균과 표준편차 계산 (Series 형태: index=Date)
+    daily_mean = X.mean(axis=1)
+    daily_std = X.std(axis=1)
+    
+    # 2. 0 나누기 방지
+    daily_std = daily_std.replace(0, np.nan)
+    
+    # 3. Broadcasting 연산 (axis=0: 날짜 인덱스끼리 매칭)
+    return X.sub(daily_mean, axis=0).div(daily_std, axis=0).fillna(0.0)
 
-    # 2) 분모=0 or NaN 방지
-    col_std = col_std.replace(0, np.nan)
-    col_std = col_std.fillna(1e-9)
+# ==============================================================================
+# [Fixed Group Ops]
+# - 기존: Time-series Grouping (한 종목의 과거 데이터끼리 그룹화) -> WRONG ❌
+# - 수정: Cross-sectional Grouping (같은 날짜의 여러 종목끼리 그룹화) -> CORRECT ✅
+# ==============================================================================
 
-    # 3) Z-score
-    Z = (X - col_mean) / col_std
-
-    # 4) 최종 NaN은 0 등으로 대체 가능
-    Z = Z.fillna(0)
-
-    return Z
-
-def vec_sum(X:dict[str, pd.DataFrame]):
+def _group_operate(X: pd.DataFrame, group: pd.DataFrame, func: str) -> pd.DataFrame:
     """
-    :param X: vector type data
-    :return: sum of each cell
+    [Core Engine]
+    모든 그룹 연산의 기반이 되는 함수입니다.
+    Data(Date x Ticker)를 Stack하여 (Date, Ticker)로 만든 뒤,
+    (Date, Group) 기준으로 Groupby 연산을 수행합니다.
     """
-    # --- 합(sum)과 개수(count)를 이용한 평균 구하기 ---
-    sum_df = None
+    # 1. MultiIndex Series로 변환 ((Date, Ticker) 형태)
+    X_stacked = X.stack(dropna=False)
+    g_stacked = group.stack(dropna=False)
+    
+    # 2. DataFrame 생성
+    df = pd.DataFrame({'val': X_stacked, 'grp': g_stacked})
+    
+    # 3. 그룹 연산 (Level 0 = Date, grp = Group)
+    #    "매 날짜마다(level=0), 각 그룹별로(grp)" func 적용
+    transformed = df.groupby([df.index.get_level_values(0), 'grp'])['val'].transform(func)
+    
+    # 4. 원래 모양(Date x Ticker)으로 복구
+    return transformed.unstack()
 
-    for df in X.values():
-        # 아직 초기값이 없으면 현재 DataFrame을 기준으로 생성
-        if sum_df is None:
-            sum_df = df.fillna(0).copy()  # NaN은 0으로 대체하여 합산
-        else:
-            sum_df += df.fillna(0)
-    return sum_df
+def group_mean(X: pd.DataFrame, group: pd.DataFrame):
+    return _group_operate(X, group, 'mean')
 
+def group_sum(X: pd.DataFrame, group: pd.DataFrame):
+    return _group_operate(X, group, 'sum')
 
-def vec_avg(X:dict[str, pd.DataFrame]):
+def group_max(X: pd.DataFrame, group: pd.DataFrame):
+    return _group_operate(X, group, 'max')
+
+def group_min(X: pd.DataFrame, group: pd.DataFrame):
+    return _group_operate(X, group, 'min')
+
+def group_std_dev(X: pd.DataFrame, group: pd.DataFrame):
+    return _group_operate(X, group, 'std')
+
+def group_zscore(X: pd.DataFrame, group: pd.DataFrame):
     """
-    :param X: vector type data
-    :return: average of each cell
+    (Value - GroupMean) / GroupStd
     """
-    return vec_sum(X)/vec_count(X)
-
-
-def vec_min(X:dict[str, pd.DataFrame]):
-    """
-    :param X: vector type data
-    :return: minimum of each cell
-    """
-    min_df = None
-    for df in X.values():
-        # NaN은 비교에 영향을 주지 않도록 +∞로 치환
-        filled_df = df.fillna(np.inf)
-        if min_df is None:
-            min_df = filled_df.copy()
-        else:
-            # 셀 단위로 최소값
-            min_df = np.minimum(min_df, filled_df)
-    # 다시 +∞를 NaN으로 복원
-    min_df = min_df.replace(np.inf, np.nan)
-    return min_df
-
-def vec_max(X:dict[str, pd.DataFrame]):
-    """
-    :param X: vector type data
-    :return: maximum of each cell
-    """
-    max_df = None
-    for df in X.values():
-        # NaN은 비교에 영향을 주지 않도록 -∞로 치환
-        filled_df = df.fillna(-np.inf)
-        if max_df is None:
-            max_df = filled_df.copy()
-        else:
-            # 셀 단위로 최소값
-            max_df = np.maximum(max_df, filled_df)
-    # 다시 -∞를 NaN으로 복원
-    min_df = max_df.replace(-np.inf, np.nan)
-    return min_df
-
-def vec_count(X: dict[str, pd.DataFrame]):
-    """
-    :param X: vector type data
-    :return: number of matrix in each cell
-    """
-    count_df = None
-    for df in X.values():
-        # 아직 초기값이 없으면 현재 DataFrame을 기준으로 생성
-        if count_df is None:
-            count_df = df.notna().astype(int)  # NaN이 아닌 셀만 1로 카운트
-        else:
-            count_df += df.notna().astype(int)
-
-    # 유효값이 전혀 없는 셀(= count_df == 0)은 0으로 나누어지지 않도록 NaN으로 처리
-    count_df = count_df.replace(0, np.nan)
-
-    return count_df
-
-
-def vec_std_dev(X:dict[str, pd.DataFrame]):
-    """
-    :param X: vector type data
-    :return: std dev of each cell
-    """
-    sum_df = None  # 각 셀의 x_i를 모두 더한 누적 합 (sum of x)
-    sum_sq_df = None  # 각 셀의 x_i^2를 모두 더한 누적 합 (sum of x^2)
-    count_df = None  # 각 셀의 유효값 개수 (n)
-
-    for df in X.values():
-        # 현재 df에서 NaN이 아닌 값만 반영하기 위해 fillna(0)를 사용
-        filled = df.fillna(0)
-        # 유효값(= NaN이 아님) 마스크
-        valid_mask = df.notna().astype(int)
-
-        if sum_df is None:
-            # 처음 한 번만 초기화
-            sum_df = filled.copy()
-            sum_sq_df = (df ** 2).fillna(0).copy()  # x^2의 합
-            count_df = valid_mask.copy()
-        else:
-            sum_df += filled
-            sum_sq_df += (df ** 2).fillna(0)
-            count_df += valid_mask
-
-    # 이제 각 셀에 대해 sum(x), sum(x^2), n(유효값 개수)가 구해졌음
-    # 표본 표준편차 계산: sqrt( ( sum(x^2) - (sum(x)^2 / n ) ) / (n - 1) )
-
-    # (n-1) 이 0 이하인 곳은 계산 불가 => NaN 처리
-    # 먼저 (n < 2) 인 곳은 NaN으로 만들어 두자
-    invalid_mask = (count_df < 2)
-    count_df2 = count_df.copy()
-    count_df2[invalid_mask] = np.nan  # 0이나 1인 경우 -> NaN으로 만들어 버림
-
-    # 편차 제곱합
-    numerator = sum_sq_df - (sum_df ** 2) / count_df2
-
-    # 표본 분산
-    var_df = numerator / (count_df2 - 1)
-
-    # 분산이 음수가 되는 경우(부동소수점 오차 등)는 0으로 클리핑
-    # (수학적으로 음수가 될 수 없으므로, 아주 미세한 오차일 가능성이 큼)
-    var_df = var_df.clip(lower=0)
-
-    # 표준편차
-    std_df = np.sqrt(var_df)
-    # n < 2인 곳은 최종적으로 NaN 처리
-    std_df[invalid_mask] = np.nan
-
-    return std_df
-
-def vec_backfill(X: dict[str, pd.DataFrame], d: int):
-    """
-    :param X: vector type data
-    :param d: lookback
-    :return: backfilled vector
-    """
-    new_dict = {}
-    for key in X.keys():
-        new_dict[key] = ts_backfill(X[key], 252)
-    return new_dict
-
-def _groupby_transform_ignorena(
-    s: pd.Series, group_labels: pd.Series, func='mean'
-) -> pd.Series:
-    """
-    s (한 칼럼의 값), group_labels(동일 index, 각 row가 속한 그룹 레이블)
-    => group_labels가 NaN인 행은 무시
-    => s가 NaN인 행은 무시
-    => 해당 group에 속한 유효값들만 모아서 func 적용
-    => transform 결과를 같은 index로 돌려줌
-    """
-    df_temp = pd.DataFrame({'val': s, 'grp': group_labels})
-    # NaN인 행(그룹 레이블 없거나 값이 없거나)은 제외
-    df_temp = df_temp.dropna(subset=['val', 'grp'])
-
-    # groupby.transform(func)를 통해 그룹별 동일한 값(평균, 합 등)으로 broadcast
-    transformed = df_temp.groupby('grp')['val'].transform(func)
-
-    # 원래 index 형태로 맞추기
-    out = pd.Series(index=s.index, dtype=float)
-    out.loc[transformed.index] = transformed
-    return out
-
-
-def group_mean_masked(
-    X: pd.DataFrame, group: pd.DataFrame, constraints: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    constraints=True인 (X, group) 값들만 사용해서,
-    '각 날짜/그룹별 평균'을 계산하고, 그 값을 동일한 shape로 리턴.
-    (constraints=False인 위치는 NaN으로 둔다)
-    """
-    def aggregator_for_mean(s: pd.Series) -> pd.Series:
-        # s.name = 현재 '열(날짜)' 이름
-        col_group = group[s.name]           # 이 날짜에서 각 종목이 속한 그룹
-        col_mask  = constraints[s.name]     # 이 날짜에서 True/False 마스크
-        # => True인 셀만 대상으로 그룹 평균
-        #    X값도 마찬가지로 False는 NaN 처리(무시)
-        s_masked = s.where(col_mask, np.nan)
-
-        # groupby transform으로 그룹 평균
-        means = _groupby_transform_ignorena(s_masked, col_group, func='mean')
-        # means는 True 위치에만 그룹평균 값이 있고, 나머지는 NaN
-        return means
-
-    # 각 날짜(열)에 대해 aggregator_for_mean을 적용
-    return X.apply(aggregator_for_mean, axis=0)
-
-
-def group_neutralize_with_constraints(
-    X: pd.DataFrame, group: pd.DataFrame, constraints: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    (1) constraints=False인 셀은 0으로 처리
-    (2) constraints=True인 셀만 그룹평균 계산 후 중립화 진행
-    (3) 각 날짜별로 constraints=True인 셀들의 절대값 합이 1이 되도록 정규화
-    (4) 재정규화 전후에 제약 마스크를 다시 곱해, 허용되지 않은 셀에 값이 들어가지 않도록 함
-    최종 결과: False인 셀은 0, True인 셀은 '그룹합=0' & '날짜별 sum(|X|)=1'
-    """
-
-    # 0) constraints를 불리언 마스크로 변환 (확실히 True/False가 되도록)
-    constraints_bool = constraints.astype(bool)
-
-    # 1) 제약조건이 False인 셀은 0으로 처리
-    X_masked = X.where(constraints_bool, 0.0)
-
-    # 2) 그룹별 평균 계산 (오직 constraints=True인 셀만 대상으로)
-    group_means = group_mean_masked(X_masked, group, constraints_bool)
-    X_neut = X_masked - group_means
-
-    # 3) 초기 정규화: 각 날짜별로, constraints=True인 셀들의 abs합으로 나누어 스케일링
-    sumabs = X_neut.abs().where(constraints_bool, 0).sum(axis=0)
-    X_scaled = X_neut.div(sumabs, axis=1).fillna(0)
-
-    # 4) 다시 제약 마스크를 곱해 미세 오차 등으로 인해 허용되지 않은 셀에 값이 남는 경우를 제거
-    X_scaled = X_scaled.where(constraints_bool, 0.0)
-
-    # 5) 재정규화: 제약조건(True)인 셀들의 절대합을 다시 1로 맞추기
-    sumabs_allowed = X_scaled.abs().where(constraints_bool, 0).sum(axis=0)
-    X_final = X_scaled.div(sumabs_allowed, axis=1).fillna(0)
-
-    return X_final
-
+    mean = group_mean(X, group)
+    std = group_std_dev(X, group)
+    return (X - mean) / std.replace(0, np.nan)
 
 def group_neutralize(X: pd.DataFrame, group: pd.DataFrame) -> pd.DataFrame:
     """
-    (1) group_mean(X, group)를 이용해 '그룹별 평균'을 빼서, 각 날짜/그룹 합=0 달성
-    (2) 각 날짜별 sum(abs(.))=1 이 되도록 스케일링
-
-    :param X:      [tickers x dates], 예: 팩터 값 or 포트폴리오 비중
-    :param group:  [tickers x dates], 그룹 라벨(섹터명 등)
-                -> 각 날짜별로 종목이 속한 그룹을 나타내는 문자열(또는 코드)
-    :return:       [tickers x dates], 중립화 & gross=1 스케일링된 결과
+    [Sector Neutralization]
+    그룹별 평균을 0으로 만듭니다. (X - GroupMean)
+    이후 날짜별 총합(Gross Exposure)이 1이 되도록 스케일링합니다.
     """
-
-    # 1) 그룹 중립화: X - group_mean(X, group)
-    gmean = group_mean(X, group)       # (tickers x dates), 각 날짜/그룹 평균
-    X_neut = X - gmean                 # 그룹별 합=0 달성
-
-    # 2) 각 날짜별 절대값 합 계산
-    abs_sum = X_neut.abs().sum(axis=0) # shape: (n_dates,)
+    # 1. 중립화
+    X_neut = X - group_mean(X, group)
     
-    # 3) 각 날짜별로 abs_sum으로 나누어 => sum(|X|)=1
-    #    abs_sum=0 인 날이 있으면 0 으로 채움
-    #    => (모두 0이라면 그대로 0)
-    result = X_neut.div(abs_sum, axis=1).fillna(0)
-
-    return result
+    # 2. 스케일링 (L1 Norm)
+    # axis=1 (Cross-sectional Sum)
+    abs_sum = X_neut.abs().sum(axis=1)
+    
+    # 0 나누기 방지
+    return X_neut.div(abs_sum.replace(0, np.nan), axis=0).fillna(0.0)
 
 def group_rank(X: pd.DataFrame, group: pd.DataFrame):
     """
-    :param X:      columns=Timeseries, index=Tickers DataFrame
-    :param group:  columns=Timeseries, index=Tickers Group Dataframe
-    :return: rank value in the same group
+    같은 날짜, 같은 그룹 내에서의 순위 (0.0 ~ 1.0)
     """
-     # 1) stack
-    #  - X_stacked, group_stacked은 각각 (티커, 열) MultiIndex에 대한 1차원 시리즈
     X_stacked = X.stack(dropna=False)
-    group_stacked = group.stack(dropna=False)
+    g_stacked = group.stack(dropna=False)
+    df = pd.DataFrame({'val': X_stacked, 'grp': g_stacked})
+    
+    # Date(Level 0)와 Group 기준으로 랭킹 계산
+    ranks = df.groupby([df.index.get_level_values(0), 'grp'])['val'].rank(pct=True)
+    
+    return ranks.unstack()
 
-    # 2) 하나의 DataFrame으로 합침
-    df_stacked = pd.DataFrame({
-        'value': X_stacked,
-        'grp': group_stacked
-    })
-    # df_stacked.index: (티커, 컬럼)
-    # df_stacked.columns: ['value', 'grp']
-
-    # 3) [컬럼, grp] 기준으로 groupby → rank
-    #  - ascending=True 이므로 큰 값일수록 rank가 큼
-    df_stacked['rank'] = df_stacked.groupby(
-        [df_stacked.index.get_level_values(1), 'grp']
-    )['value'].rank(method='min', ascending=True)
-
-    # 4) rank_min, rank_max를 그룹별로 구한 뒤 transform('min'), transform('max')
-    df_stacked['rank_min'] = df_stacked.groupby(
-        [df_stacked.index.get_level_values(1), 'grp']
-    )['rank'].transform('min')
-
-    df_stacked['rank_max'] = df_stacked.groupby(
-        [df_stacked.index.get_level_values(1), 'grp']
-    )['rank'].transform('max')
-
-    # 5) 스케일링: (rank - rank_min) / (rank_max - rank_min)
-    #    분모가 0인 경우(그룹 내 종목이 1개뿐 등)는 0으로 처리
-    eps = 1e-9
-    denom = (df_stacked['rank_max'] - df_stacked['rank_min']).replace(0, np.nan)
-    df_stacked['scaled'] = (df_stacked['rank'] - df_stacked['rank_min']) / denom
-    df_stacked['scaled'] = df_stacked['scaled'].fillna(0)
-
-    # 6) 다시 2차원 형태로 복원 (unstack)
-    #    - level=1이 날짜(열)이므로, unstack(level=1)을 하면 열 축으로 복원
-    result = df_stacked['scaled'].unstack(level=1)
-
-    # 7) 원래 순서대로 reindex
-    result = result.reindex(index=X.index, columns=X.columns)
-
-    return result
-
-def group_zscore(X: pd.DataFrame, group: pd.DataFrame):
-    return (X - group_mean(X, group))/group_std_dev(X, group)
-
-def group_sum(X: pd.DataFrame, group: pd.DataFrame):
-    def aggregator_for_sum(s: pd.Series) -> pd.Series:
-        col_group = group[s.name]
-        return _groupby_transform_ignorena(s, col_group, 'sum')
-    return X.apply(aggregator_for_sum)
-
-def group_mean(X: pd.DataFrame, group: pd.DataFrame):
-    def aggregator_for_mean(s: pd.Series) -> pd.Series:
-        col_group = group[s.name]
-        return _groupby_transform_ignorena(s, col_group, 'mean')
-    return X.apply(aggregator_for_mean)
-
-def group_max(X: pd.DataFrame, group: pd.DataFrame):
-    def aggregator_for_max(s: pd.Series) -> pd.Series:
-        col_group = group[s.name]
-        return _groupby_transform_ignorena(s, col_group, 'max')
-    return X.apply(aggregator_for_max)
-
-def group_min(X: pd.DataFrame, group: pd.DataFrame):
-    def aggregator_for_min(s: pd.Series) -> pd.Series:
-        col_group = group[s.name]
-        return _groupby_transform_ignorena(s, col_group, 'min')
-    return X.apply(aggregator_for_min)
-
-def group_std_dev(X: pd.DataFrame, group: pd.DataFrame):
-    def aggregator_for_std(s: pd.Series) -> pd.Series:
-        col_group = group[s.name]
-        return _groupby_transform_ignorena(s, col_group, 'std')
-    return X.apply(aggregator_for_std)
-
-def _groupby_transform_ignorena(s: pd.Series, g: pd.Series, func: str) -> pd.Series:
+def basket(X: pd.DataFrame, tile: list[float]):
     """
-    s : X의 '한 컬럼' (tickers x 1개 date)
-    g : group의 '한 컬럼' (tickers x 1개 date)
-    func : 'sum', 'mean', 'max', 'min', 'std' 등 집계 함수
+    [Cross-sectional Basket]
+    매일매일 종목들을 순위별로 줄 세워서 그룹(Basket)을 할당합니다.
+    예: tile=[0.5] -> 상위 50%는 1, 하위 50%는 0
     """
-    # (1) s와 g를 합쳐서 DataFrame을 만들고,
-    #     group 컬럼이 NaN인 행은 drop
-    df = pd.DataFrame({'val': s, 'grp': g})
-    df_drop = df.dropna(subset=['grp'])  # grp=NaN인 행 제외
+    # 1. 날짜별(axis=1) 랭킹 계산 (0~1)
+    #    method='first'로 동점자 처리
+    ranks = X.rank(axis=1, pct=True, method='first')
+    
+    # 2. 구간 할당
+    #    bins: [0, 0.3, 0.7, 1.0] -> labels: [0, 1, 2]
+    #    right=True: ( ] 구간 (기본값)
+    bins = [-1.0] + tile + [2.0] # 넉넉하게 잡음
+    labels = list(range(len(bins) - 1))
+    
+    # pandas cut은 1차원만 지원하므로 stack 후 처리
+    stacked_ranks = ranks.stack(dropna=False)
+    baskets = pd.cut(stacked_ranks, bins=bins, labels=labels)
+    
+    # 복구 및 숫자형 변환
+    return baskets.unstack().astype('float32')
 
-    # (2) groupby-transform
-    #     => 예: df_drop.groupby('grp')['val'].transform('sum')
-    df_drop['agg'] = df_drop.groupby('grp')['val'].transform(func)
+# --- Complex Group Ops (Neutralize with Constraints 등) ---
 
-    # (3) 원래 인덱스 순서를 유지하기 위해 reindex
-    #     group=NaN이었던 행은 집계결과가 없으므로 NaN 유지
-    df_result = df_drop.reindex(df.index)
+def group_mean_masked(X: pd.DataFrame, group: pd.DataFrame, constraints: pd.DataFrame) -> pd.DataFrame:
+    """
+    constraints가 True인 종목들만 사용하여 그룹 평균을 구함.
+    결과는 모든 종목 위치에 broadcast됨.
+    """
+    # 마스크 적용 (False인 곳은 NaN 처리하여 평균 계산에서 제외)
+    X_masked = X.where(constraints.astype(bool), np.nan)
+    return group_mean(X_masked, group)
 
-    return df_result['agg']
+def group_neutralize_with_constraints(X: pd.DataFrame, group: pd.DataFrame, constraints: pd.DataFrame) -> pd.DataFrame:
+    """
+    1. Constraints=True인 종목들만 대상으로 그룹 평균 계산
+    2. 중립화 (X - Mean)
+    3. Constraints=False인 종목은 0으로 만듦
+    4. 전체 Gross=1 스케일링
+    """
+    mask = constraints.astype(bool)
+    
+    # 1. 마스킹된 그룹 평균
+    gmean = group_mean_masked(X, group, mask)
+    
+    # 2. 중립화
+    X_neut = X - gmean
+    
+    # 3. 마스크 밖 제거
+    X_neut = X_neut.where(mask, 0.0)
+    
+    # 4. 스케일링
+    abs_sum = X_neut.abs().sum(axis=1)
+    return X_neut.div(abs_sum.replace(0, np.nan), axis=0).fillna(0.0)
 
 def group_vector_proj(X: pd.DataFrame, Y: pd.DataFrame, group: pd.DataFrame):
     """
-    (각 날짜, 그룹별로)
-      1) X, Y를 같은 그룹인 종목끼리 묶어
-      2) '벡터 투영' 계산: 
-         Proj_X_on_Y = (X dot Y / Y dot Y) * Y
-      3) 최종적으로 X와 동일 shape의 DataFrame 리턴
+    그룹별 벡터 투영: Proj_Y(X) = (X.Y / Y.Y) * Y
+    (같은 날짜, 같은 그룹 내에서 계산)
     """
-
-    # 1) stack하여 한 번에 처리 (날짜, 그룹별 연산)
-    #    index: (티커, date), columns: [X, Y, group]
-    #    -> 그러나 여기서는 X, Y, group이 모두 (행=종목, 열=날짜)이므로
-    #       각 열별로 groupby를 해야 함
-    #    아래는 apply(lambda col: ...) 방식으로 열을 순회
-    def _proj_one_column(col_X, col_Y, col_group):
-        # col_X, col_Y는 Series(index=티커), col_group도 Series(index=티커)
-        # 그룹별로 벡터 투영 계산
-        df = pd.DataFrame({'x': col_X, 'y': col_Y, 'grp': col_group})
-        # grp 기준으로 나눠서 (x,y) 벡터의 dot prod 계산
-        def _compute_proj(g):
-            # g[['x','y']] -> 각각 종목별 값
-            x_vec = g['x']
-            y_vec = g['y']
-            # dot_xy, dot_yy
-            dot_xy = (x_vec * y_vec).sum()
-            dot_yy = (y_vec * y_vec).sum()
-            if dot_yy == 0:
-                # 모든 y가 0이거나 nan이면, 투영 불가 -> 0 처리
-                return pd.Series([0]*len(x_vec), index=x_vec.index)
-            ratio = dot_xy / dot_yy
-            proj_vec = y_vec * ratio
-            return proj_vec
-
-        # 그룹별 apply
-        df['proj'] = df.groupby('grp').apply(_compute_proj).reset_index(level=0, drop=True)
-        return df['proj']
-    result = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
-    for c in X.columns:
-        result[c] = _proj_one_column(X[c], Y[c], group[c])
-    return result
-
-def group_scale(X: pd.DataFrame, Y: pd.DataFrame, group: pd.DataFrame):
-    """
-    (각 날짜, 그룹별로)
-      - X를 Min-Max 정규화: (X - min) / (max - min)
-      - 이때 Y는 굳이 안 쓰거나, 다른 파라미터로 확장 가능
-        (현재 예시에서는 Y 사용 X)
-    """
-    def _scale_one_column(col_X, col_group):
-        df = pd.DataFrame({'x': col_X, 'grp': col_group})
-        def _compute_scale(g):
-            x_vec = g['x']
-            mn = x_vec.min()
-            mx = x_vec.max()
-            if mx == mn:
-                return pd.Series([0]*len(g), index=g.index)
-            return (x_vec - mn) / (mx - mn)
-        df['scaled'] = df.groupby('grp').apply(_compute_scale).reset_index(level=0, drop=True)
-        return df['scaled']
-    result = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
-    for c in X.columns:
-        result[c] = _scale_one_column(X[c], group[c])
-    return result
+    # X.Y와 Y.Y를 그룹별로 합산 (Group Sum)
+    dot_xy = group_sum(X * Y, group)
+    dot_yy = group_sum(Y * Y, group)
+    
+    ratio = dot_xy / dot_yy.replace(0, np.nan)
+    return ratio * Y
 
 def group_vector_neut(X: pd.DataFrame, Y: pd.DataFrame, group: pd.DataFrame):
     return X - group_vector_proj(X, Y, group)
 
+def group_scale(X: pd.DataFrame, group: pd.DataFrame):
+    """
+    그룹별 Min-Max Scaling (0~1)
+    """
+    g_min = group_min(X, group)
+    g_max = group_max(X, group)
+    
+    return (X - g_min) / (g_max - g_min).replace(0, np.nan)
+
 def group_cartesian_product(group1: pd.DataFrame, group2: pd.DataFrame):
-    result = pd.DataFrame(index=group1.index, columns=group1.columns, dtype=object)
-    for c in group1.columns:
-        # group1[c], group2[c] 각각 ticker별 라벨
-        if group1[c].dtype == 'object':
-            s1 = group1[c].fillna('Unknown')
-        else:
-            s1 = group1[c].fillna(0)
-
-        if group2[c].dtype == 'object':
-            s2 = group2[c].fillna('Unknown')
-        else:
-            s2 = group2[c].fillna(0)
-        combined = s1.astype(str) + '|' + s2.astype(str)
-        result[c] = combined
-    return result
-
-def basket(X: pd.DataFrame, tile: list[float]):
     """
-    generate group datafield based on X and tile
-    EX) X = get_data('MarketCap'), tile = [0.33, 0.66]
-    Then, set 0~0.33 rank of X be 0, 0.33~0.66 rank of X be 1, and 0.66~1 rank of X be 2.
+    두 그룹의 조합을 새로운 그룹으로 생성 (예: Sector + Size -> "Tech_Large")
+    문자열 결합 연산이므로 element-wise로 처리
     """
-    baskets = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
+    # NaN 처리
+    g1 = group1.fillna('N/A').astype(str)
+    g2 = group2.fillna('N/A').astype(str)
     
-    # 각 날짜(열)마다 반복
-    for col in X.columns:
-        col_series = X[col]
-        
-        # 1) NaN을 제외한 값에 대해 rank() 수행
-        #    - method='dense': 순위 간격을 1씩 부여, 예) [10,10,15] -> rank=[1,1,2]
-        #    - ascending=True : 값이 작은게 rank가 작음
-        ranks = col_series.rank(method='dense', ascending=True)
-        
-        # 2) rank를 [0,1] 구간으로 스케일링
-        #    - (rank - min) / (max - min)
-        rank_min = ranks.min()
-        rank_max = ranks.max()
-        
-        # 만약 모든 값이 NaN이거나 동일하다면(분모=0) → 해당 열 전부 NaN 처리
-        if pd.isna(rank_min) or pd.isna(rank_max) or rank_min == rank_max:
-            baskets[col] = np.nan
-            continue
-        
-        scaled_ranks = (ranks - rank_min) / (rank_max - rank_min)
-        
-        # 3) tile 경계값을 이용해 pd.cut() 실행
-        #    - bins 예시: [0, 0.33, 0.66, 1.0000001]
-        #    - right=False → 구간 [이상, 미만) 으로 처리
-        bins = [0] + tile + [1.0000001]  # upper bound를 약간 더 높게
-        labels = list(range(len(bins) - 1))  # 0, 1, 2, ...
-        
-        # cut으로 구간 분할
-        col_baskets = pd.cut(
-            scaled_ranks, 
-            bins=bins, 
-            labels=labels, 
-            right=False
-        )
-        
-        baskets[col] = col_baskets
-    
-    # 그룹 레이블을 int로 맞춤
-    return baskets.astype('Int64')  # or just int, but allow NA → 'Int64' for nullable int
+    return g1 + "_" + g2
 
 def signed_power(X: pd.DataFrame, power: int = 2):
     sign_x = np.sign(X)
