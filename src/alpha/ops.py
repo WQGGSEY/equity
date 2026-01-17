@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import scipy
 from collections import deque
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 def safe_pinv(A: np.ndarray|pd.DataFrame) -> np.ndarray:
     """
@@ -66,6 +68,13 @@ def divide(X: pd.DataFrame, Y: pd.DataFrame):
     :return: X/Y
     """
     return X/Y
+
+def ts_return(X: pd.DataFrame, d:int):
+    """
+    :param X: columns=Timeseries, index=Tickers Dataframe
+    :param d: lookback days
+    """
+    return (X - ts_delay(X, d)) / ts_delay(X, d)
 
 
 def df_abs(X: pd.DataFrame):
@@ -197,26 +206,61 @@ def ts_co_kurtosis(X:pd.DataFrame, Y:pd.DataFrame, d:int):
     return (dev_x*(dev_y**3)).rolling(window=d, axis=1).mean()/(std_x*(std_y**3))
 
 
-def ts_covariance(X:pd.DataFrame, Y:pd.DataFrame, d:int):
+def ts_covariance(X: pd.DataFrame, Y: pd.DataFrame, d: int) -> pd.DataFrame:
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :param Y: columns=Timeseries, index=Tickers Dataframe
-    :param d: lookback days
-    :return: Covariance between X & Y
+    메모리 효율적인 공분산 계산 (E[XY] - E[X]E[Y] 공식 사용)
+    O(N*T*d) 메모리 -> O(N*T) 메모리로 감소
     """
-    dev_x = ts_av_diff(X, d)
-    dev_y = ts_av_diff(Y, d)
-    return (dev_x*dev_y).rolling(window=d, axis=1).sum()/(d-1)
+    # 1. E[X], E[Y] 계산 (단순 롤링 평균)
+    mean_x = ts_mean(X, d)
+    mean_y = ts_mean(Y, d)
+    
+    # 2. E[XY] 계산
+    mean_xy = ts_mean(X * Y, d)
+    
+    # 3. Cov = E[XY] - E[X]E[Y] (보정 계수 n/(n-1) 적용)
+    cov = (mean_xy - mean_x * mean_y) * (d / (d - 1))
+    return cov
 
+def ts_variance(X: pd.DataFrame, d: int) -> pd.DataFrame:
+    """메모리 효율적인 분산 계산"""
+    mean_x = ts_mean(X, d)
+    mean_x2 = ts_mean(X * X, d)
+    var = (mean_x2 - mean_x * mean_x) * (d / (d - 1))
+    return var
 
-def ts_corr(X:pd.DataFrame, Y:pd.DataFrame, d:int):
+def ts_regression(Y: pd.DataFrame, X: pd.DataFrame, d: int, rettype: int = 0) -> pd.DataFrame:
     """
-    :param X: columns=Timeseries, index=Tickers Dataframe
-    :param Y: columns=Timeseries, index=Tickers Dataframe
-    :param d: lookback days
-    :return: Pearson Correlation of X & Y
+    Rolling Regression (Y ~ a + b*X)
+    rettype: 0=residual, 1=slope(b), 2=intercept(a), 3=fitted_value
     """
-    return ts_covariance(X, Y, d) / (ts_std_dev(X, d)*ts_std_dev(Y, d))
+    # 1. Slope (Beta) = Cov(X, Y) / Var(X)
+    cov_xy = ts_covariance(X, Y, d)
+    var_x = ts_variance(X, d)
+    
+    beta = cov_xy / (var_x + 1e-9) # 0 나누기 방지
+    
+    # 2. Intercept (Alpha) = E[Y] - Beta * E[X]
+    mean_x = ts_mean(X, d)
+    mean_y = ts_mean(Y, d)
+    alpha = mean_y - beta * mean_x
+    
+    if rettype == 1: # Slope
+        return beta
+    elif rettype == 2: # Intercept
+        return alpha
+    elif rettype == 3: # Fitted Value (Prediction)
+        return alpha + beta * X
+    else: # Residual (Error) -> Y - (Alpha + Beta * X)
+        # 잔차(Residual)는 평균 회귀 전략에서 가장 많이 쓰임
+        return Y - (alpha + beta * X)
+
+def ts_corr(X: pd.DataFrame, Y: pd.DataFrame, d: int) -> pd.DataFrame:
+    """상관계수 (Correlation)"""
+    cov_xy = ts_covariance(X, Y, d)
+    std_x = ts_std_dev(X, d)
+    std_y = ts_std_dev(Y, d)
+    return cov_xy / (std_x * std_y + 1e-9)
 
 
 def ts_ema(X:pd.DataFrame, d:int):
@@ -1751,6 +1795,41 @@ def prev_value(X: pd.DataFrame):
     # 결과 DataFrame 생성
     out_df = pd.DataFrame(out_arr, index=X.index, columns=X.columns)
     return out_df
+
+
+
+def ts_frac_diff(df: pd.DataFrame, d: float, window: int = 20) -> pd.DataFrame:
+    """
+    Fractional Differentiation Operator
+    :param df: Time-Series DataFrame (Index=Date, Col=Ticker)
+    :param d: 차분 계수 (0.0 ~ 1.0 사이, 보통 0.3~0.7 사용)
+    :param window: 계산에 사용할 과거 기간 (너무 크면 느려짐, 20~50 권장)
+    :return: 분수 차분된 데이터프레임
+    """
+    # 1. 가중치 미리 계산 (모든 종목에 동일 적용)
+    def _get_weights(d: float, size: int) -> np.ndarray:
+        """
+        분수 차분을 위한 가중치 계산 (이항 전개)
+        :param d: 차분 차수 (예: 0.4, 0.6 등)
+        :param size: 윈도우 크기
+        """
+        w = [1.0]
+        for k in range(1, size):
+            w_k = -w[-1] * (d - k + 1) / k
+            w.append(w_k)
+        # 최근 데이터가 가장 뒤에 오도록 뒤집음 (Convolution용)
+        return np.array(w[::-1])
+
+    weights = _get_weights(d, window)
+    
+    # 2. 롤링 윈도우에 가중치 적용 (Dot Product)
+    # raw=True를 써야 numpy 연산으로 빠르게 처리됨
+    # (메모리 최적화를 위해 fillna(0) 처리 후 수행)
+    return df.fillna(method='ffill').rolling(window=window).apply(
+        lambda x: np.dot(x, weights), 
+        raw=True
+    )
+
 
 def __raise_no_file_error__(contents, others=''):
     raise FileNotFoundError(f'Download Data {contents} -> Update.py {others}')

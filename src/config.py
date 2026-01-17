@@ -49,30 +49,6 @@ ACTIVE_FEATURES = [
             'd': 0.4,             # 차분 차수
         }
     },
-    {
-        'class': 'TrdAmount',
-        'module': 'src.features.technical',
-        'params': { }
-    },
-    {
-        'class': 'FD_TrdAmount',
-        'module': 'src.features.technical',
-        'params': { }
-    },
-    {
-        'class': 'FD_MovingAverage',
-        'module': 'src.features.technical',
-        'params': {
-            'window': 5
-        }
-    },
-    {
-        'class': 'FD_Daily_Return',
-        'module': 'src.features.technical',
-        'params': { 
-            'window': 1
-        }
-    },
     # 모델의 구체적 스펙은 저장된 파일(.pth) 헤더에서 자동으로 읽어옴
     {
         'class': 'Contrastive_OC_HL',

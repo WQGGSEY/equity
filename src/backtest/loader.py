@@ -92,11 +92,17 @@ class MarketData:
             'dates': self.dates
         }
         self.cache_manager.save(save_data, cache_name)
+        
+        import gc
+        gc.collect()
 
 
 def _load_single_parquet(path):
     try:
         df = pd.read_parquet(path)
+        float_cols = df.select_dtypes(include=['float64']).columns
+        if len(float_cols) > 0:
+            df[float_cols] = df[float_cols].astype('float32')
         return (path.stem, df)
     except:
         return None

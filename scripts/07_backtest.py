@@ -163,6 +163,7 @@ def main(config_path):
     fee_rate = bt_cfg.get('fee_rate', 0.0)
     slippage = bt_cfg.get('slippage', 0.0)
     total_cost_rate = fee_rate + slippage
+    universe_size = bt_cfg.get('universe_size', 3000)
     
     print(f"⚙️  Engine Settings: Fee={fee_rate*100:.3f}%, Slippage={slippage*100:.3f}% -> Total Cost={total_cost_rate*100:.3f}%")
     
@@ -171,7 +172,8 @@ def main(config_path):
         md, 
         start_date=bt_cfg.get('start_date'), 
         end_date=bt_cfg.get('end_date'),
-        fee_rate=total_cost_rate
+        fee_rate=total_cost_rate,
+        universe_size=universe_size
     )
     
     # 2. Strategy Logic

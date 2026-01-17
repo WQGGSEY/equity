@@ -20,8 +20,9 @@ class Portfolio:
 
 class BacktestEngine:
     # [수정 1] __init__에서 fee_rate를 인자로 받도록 변경
-    def __init__(self, market_data, start_date=None, end_date=None, fee_rate=0.0):
+    def __init__(self, market_data, start_date=None, end_date=None, fee_rate=0.0, universe_size=3000):
         self.md = market_data
+        self.universe_size = universe_size
         
         # [수정 2] 수수료율 저장 (기본값 0.0)
         self.fee_rate = fee_rate 
@@ -43,7 +44,7 @@ class BacktestEngine:
         self.vwap = (o + h + l + c) / 4.0
 
     def _precompute_universe(self):
-        print("🌌 Pre-computing Dynamic Universe (Top 3000 Liquidity)...")
+        print(f"🌌 Pre-computing Dynamic Universe (Top {self.universe_size} Liquidity)...")
         # Amount가 없으면 Close * Volume으로 대체
         amount = self.md.prices.get('Amount', self.md.prices['Close'] * self.md.prices['Volume'])
         rolling_amt = amount.rolling(window=20, min_periods=1).mean()
@@ -53,7 +54,7 @@ class BacktestEngine:
         price_filter = (self.md.prices['Close'] > 1.0)
         
         # 랭킹 3000위 이내이면서 & 가격이 1달러 이상인 종목만 True
-        return (rank_matrix <= 3000) & price_filter
+        return (rank_matrix <= self.universe_size) & price_filter
 
     def run(self, strategy, initial_cash=100_000_000):
         print(f"▶️ Running Strategy: {strategy.name} (Execution: Next Day VWAP)")

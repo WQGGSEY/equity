@@ -80,7 +80,10 @@ class FormulaStrategy(Strategy):
         
         if valid_scores.empty: return []
 
-        top_stocks = valid_scores.nlargest(self.top_n).index.tolist()
+        if self.top_n > 0:
+            top_stocks = valid_scores.nlargest(self.top_n).index.tolist()
+        else:
+            top_stocks = valid_scores.nsmallest(-self.top_n).index.tolist()
         target_weight = 1.0 / len(top_stocks) if top_stocks else 0
         orders = []
         
