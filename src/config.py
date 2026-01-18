@@ -37,24 +37,32 @@ USE_THREADS = False
 PENNY_STOCK_THRESHOLD = 1.0   # 1달러 미만 동전주는 병합 주체 제외
 MAX_BUCKET_SIZE = 300         # 버킷 당 최대 정밀 비교 개수
 
-# ==========================================
-# [Feature Pipeline] 활성화된 Feature 목록
-# ==========================================
+
 ACTIVE_FEATURES = [
+    # 1. 일반 로컬 피처
     {
         'class': 'DollarBarStationaryFeature',
         'module': 'src.features.preprocessors',
-        'params': {
-            'threshold': 50_000,  # 1억원 단위 (종목 유동성에 따라 조절 필요)
-            'd': 0.4,             # 차분 차수
-        }
+        'params': {'threshold': 50_000, 'd': 0.4}
     },
-    # 모델의 구체적 스펙은 저장된 파일(.pth) 헤더에서 자동으로 읽어옴
+    
+    # 2. 글로벌 피처 (Processor가 알아서 Phase 1에서 계산함)
+    {
+        'class': 'SectorGroup',
+        'module': 'src.features.cross_sectional',
+        'params': {'window': 252}
+    },
+    {
+        'class': 'LiquidityGroup',
+        'module': 'src.features.cross_sectional',
+        'params': {'window': 126, 'bins': 10}
+    },
+    # 3. 모델 피처
     {
         'class': 'Contrastive_OC_HL',
         'module': 'src.features.contrastive', 
         'params': {
            'model_path': str(MODEL_WEIGHTS_DIR / "ts2vec_learnable_tau.pth")
         }
-    },
+    }
 ]

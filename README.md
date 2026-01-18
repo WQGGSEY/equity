@@ -223,3 +223,18 @@ source .venv/bin/activate  # Mac/Linux
 pip install -r requirements.txt
 
 ```
+
+---
+
+## 📋 4. 데이터 사전 (Data Dictionary)
+
+`scripts/06_create_platinum.py` 실행 후 생성되는 `data/platinum/features/{ticker}.parquet` 파일의 컬럼 명세입니다. 이 파일 하나에 OHLCV, 전처리된 피처, 그룹 정보, 모델 임베딩이 모두 포함되어 있습니다.
+
+| Column Name | Source Module | Defined Class | Description |
+| --- | --- | --- | --- |
+| **Open, High, Low, Close** | Raw Data | - | Yahoo Finance에서 수집한 시가, 고가, 저가, 종가 (Adjusted Price 반영) |
+| **Volume** | Raw Data | - | 거래량 |
+| **FD_Open, FD_High, FD_Low, FD_Close** | `src/features/preprocessors.py` | `DollarBarStationaryFeature` | 시간 기준이 아닌 **Dollar Bar(거래대금)** 기준으로 샘플링한 후, **분별 차분(FracDiff)**을 적용하여 정상성(Stationarity)을 확보한 가격 데이터 |
+| **grp_sector** | `src/features/groups.py` | `SectorGroup` | 주요 섹터 ETF(XLK, XLF 등)와의 수익률 상관계수를 기반으로 매일 동적으로 할당된 **섹터 그룹 ID** (0~10) |
+| **grp_liquidity** | `src/features/groups.py` | `LiquidityGroup` | 전체 시장 내 거래대금(Dollar Volume) 순위를 기준으로 나눈 **유동성 등급** (0: 하위 ~ 9: 상위) |
+| **ts2vec_manifold_0, ts2vec_manifold_1, ts2vec_manifold_2** | `src/features/contrastive.py` | `Contrastive_OC_HL` | **TS2Vec** 모델이 학습한 고차원 시장 내재 표현을 Micro-Autoencoder를 통해 압축한 **저차원 Manifold 좌표**. (유사한 가격 패턴을 가진 종목은 이 좌표상에서 가깝게 위치함) |

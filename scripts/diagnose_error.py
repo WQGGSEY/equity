@@ -1,117 +1,135 @@
-import pandas as pd
 import sys
+import pandas as pd
 from pathlib import Path
-from tqdm import tqdm
+import importlib
 
 # 프로젝트 루트 경로 설정
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+FILE_PATH = Path(__file__).resolve()
+PROJECT_DIR = FILE_PATH.parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
 
-from src.config import PLATINUM_FEATURES_DIR
+from src.config import GOLD_DIR, ACTIVE_FEATURES
+from src.features.base import GlobalFeature
 
-# 점검할 주요 대장주 리스트 (Top 20 Mega Caps)
-TARGET_GIANTS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "BRK-B", "LLY", "V", 
-    "TSM", "JPM", "WMT", "XOM", "UNH", "MA", "PG", "JNJ", "HD", "COST"
-]
+# 디버깅할 종목 (Gold에 존재하는 파일명으로 변경 가능)
+TARGET_TICKER = "AAPL" 
 
-def diagnose_dataset():
-    print(f"🔍 [데이터셋 정밀 진단] Platinum 데이터를 검사합니다...")
-    print(f"📂 경로: {PLATINUM_FEATURES_DIR}\n")
+def load_feature_class(module_path, class_name):
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except Exception as e:
+        print(f"    [Error] Failed to load {class_name}: {e}")
+        return None
 
-    if not PLATINUM_FEATURES_DIR.exists():
-        print("❌ Platinum 디렉토리가 없습니다.")
-        return
-
-    # 1. 파일 목록 로드
-    files = list(PLATINUM_FEATURES_DIR.glob("*.parquet"))
-    existing_tickers = set(f.stem for f in files)
+def debug_process():
+    print(f"🔍 [DEBUG] Starting Debugging for: {TARGET_TICKER}")
     
-    print(f"✅ 총 발견된 파일 수: {len(files)}개")
-
-    # ==========================================
-    # [진단 1] 주요 대장주(Giants) 존재 여부 확인
-    # ==========================================
-    print("\n" + "="*50)
-    print("💎 [Step 1] 주요 대장주 존재 여부 체크")
-    print("="*50)
-    
-    missing_giants = []
-    found_giants = []
-    
-    for t in TARGET_GIANTS:
-        if t in existing_tickers:
-            found_giants.append(t)
+    # 1. Gold 파일 로드
+    gold_path = GOLD_DIR / f"{TARGET_TICKER}.parquet"
+    if not gold_path.exists():
+        print(f"❌ Gold file not found: {gold_path}")
+        # 아무 파일이나 하나 찾아서 대체
+        files = list(GOLD_DIR.glob("*.parquet"))
+        if files:
+            gold_path = files[0]
+            print(f"⚠️ Using alternative file: {gold_path.name}")
         else:
-            missing_giants.append(t)
+            print("❌ No Gold files found. Aborting.")
+            return
+
+    df = pd.read_parquet(gold_path)
+    df = df[~df.index.duplicated(keep='last')] # 중복 제거
+    
+    print("\n" + "="*50)
+    print(f"✅ Step 1: Initial Load")
+    print(f"   - Shape: {df.shape}")
+    print(f"   - Columns: {list(df.columns)}")
+    print(f"   - Index Example: {df.index[:3].tolist()} ...")
+    print("="*50)
+
+    # 2. Feature Loop 디버깅
+    final_df = df.copy()
+    final_df['ticker'] = gold_path.stem # Context Injection
+
+    for i, cfg in enumerate(ACTIVE_FEATURES):
+        cls_name = cfg['class']
+        print(f"\n▶️ [Feature {i+1}] Processing: {cls_name}")
+        
+        cls = load_feature_class(cfg['module'], cls_name)
+        if not cls:
+            print("   ❌ Class loading failed.")
+            continue
             
-    if found_giants:
-        print(f"✅ 발견됨 ({len(found_giants)}개): {found_giants}")
-    
-    if missing_giants:
-        print(f"🚨 [CRITICAL] 누락됨 ({len(missing_giants)}개): {missing_giants}")
-        print("   -> 01_define_universe.py 또는 02_data_download.py에서 누락되었습니다.")
-        print("   -> 'scripts/force_download_giants.py'를 실행하여 긴급 복구가 필요합니다.")
-    else:
-        print("🎉 모든 대장주가 정상적으로 존재합니다.")
-
-    # ==========================================
-    # [진단 2] 잡주(XYZ) 및 이상 종목 확인
-    # ==========================================
-    print("\n" + "="*50)
-    print("🗑️ [Step 2] 테스트용 잡주(XYZ) 확인")
-    print("="*50)
-    
-    suspicious = ["XYZ", "ABC", "TEST"]
-    found_suspicious = [t for t in suspicious if t in existing_tickers]
-    
-    if found_suspicious:
-        print(f"⚠️ [WARNING] 테스트용 데이터 발견: {found_suspicious}")
-        print("   -> 백테스트 결과를 왜곡할 수 있으므로 삭제를 권장합니다.")
-    else:
-        print("✅ 이상한 종목(XYZ 등)은 발견되지 않았습니다.")
-
-    # ==========================================
-    # [진단 3] FD 변수 건강 상태 체크 (기존 로직)
-    # ==========================================
-    print("\n" + "="*50)
-    print("🏥 [Step 3] FD 변수 결측(NaN) 진단")
-    print("="*50)
-    
-    missing_fd_files = []
-    all_nan_files = []
-    
-    # 너무 많으면 오래 걸리므로 Giants 위주로 먼저 샘플링하거나 전체 수행
-    # 여기서는 발견된 Giants + 랜덤 100개만 체크
-    check_targets = list(found_giants) + list(existing_tickers)[:100]
-    check_targets = list(set(check_targets)) # 중복 제거
-    
-    for t in tqdm(check_targets, desc="Checking FD Columns"):
-        file_path = PLATINUM_FEATURES_DIR / f"{t}.parquet"
         try:
-            df = pd.read_parquet(file_path)
-            fd_cols = [c for c in df.columns if c.startswith('FD_')]
+            params = cfg.get('params', {})
+            instance = cls(**params)
             
-            if not fd_cols:
-                missing_fd_files.append(t)
-                continue
+            # [CHECKPOINT 1] Pre-compute state
+            print(f"   Before compute shape: {final_df.shape}")
             
-            # 첫 번째 FD 컬럼 기준 검사
-            target_col = 'FD_Close' if 'FD_Close' in fd_cols else fd_cols[0]
-            if df[target_col].isna().all():
-                all_nan_files.append(t)
-                
-        except Exception:
-            pass
+            # Compute
+            # GlobalFeature 여부 확인
+            is_global = False
+            try:
+                if issubclass(cls, GlobalFeature): is_global = True
+            except: pass
 
-    if missing_fd_files:
-        print(f"\n❌ FD 컬럼 없음: {len(missing_fd_files)}개 ({missing_fd_files[:5]}...)")
-    if all_nan_files:
-        print(f"💀 FD 전부 NaN (계산실패): {len(all_nan_files)}개 ({all_nan_files[:5]}...)")
+            if is_global:
+                print("   (Global Feature Mode)")
+                res = instance.compute(final_df) # No Copy
+            else:
+                print("   (Local Feature Mode - Copying DF)")
+                res = instance.compute(final_df.copy()) # Copy
+            
+            # [CHECKPOINT 2] Result Inspection
+            if isinstance(res, pd.DataFrame):
+                print(f"   👉 Output Shape: {res.shape}")
+                print(f"   👉 Output Columns: {list(res.columns)}")
+                print(f"   👉 Output Index Match: {res.index.equals(final_df.index)}")
+                if not res.index.equals(final_df.index):
+                    print(f"      ⚠️ Index Mismatch Detected!")
+                    print(f"      Target(Daily): {final_df.index[:3].tolist()}")
+                    print(f"      Result: {res.index[:3].tolist()}")
+            
+            # Merge Logic Debug
+            prev_cols = set(final_df.columns)
+            
+            if isinstance(res, pd.Series):
+                final_df[res.name] = res
+            elif isinstance(res, pd.DataFrame) and not res.empty:
+                new_cols = res.columns.difference(final_df.columns)
+                if not new_cols.empty:
+                    print(f"   ➕ Merging columns: {list(new_cols)}")
+                    # concat 수행
+                    final_df = pd.concat([final_df, res[new_cols]], axis=1)
+                else:
+                    print("   ℹ️ No new columns to merge.")
+            
+            # [CHECKPOINT 3] Post-merge state
+            print(f"   ✅ After Merge Shape: {final_df.shape}")
+            print(f"   ✅ Current NaN Count: {final_df.isna().sum().sum()}")
+            
+        except Exception as e:
+            print(f"   ❌ Execution Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # 3. Final Dropna Check
+    print("\n" + "="*50)
+    print("🧹 Final Cleanup Phase")
+    print(f"   Before dropna shape: {final_df.shape}")
     
-    if not missing_fd_files and not all_nan_files:
-        print("✅ 체크한 파일들의 데이터 상태는 양호합니다.")
+    # 어디서 NaN이 많은지 확인
+    nan_counts = final_df.isna().sum()
+    print("   [NaN Distribution]")
+    print(nan_counts[nan_counts > 0])
+    
+    final_df.dropna(inplace=True)
+    print(f"   After dropna shape: {final_df.shape}")
+    print(f"   Final Columns: {list(final_df.columns)}")
+    print("="*50)
 
 if __name__ == "__main__":
-    diagnose_dataset()
+    debug_process()

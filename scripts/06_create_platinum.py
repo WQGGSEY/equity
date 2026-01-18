@@ -1,37 +1,31 @@
 import sys
 import multiprocessing
 from pathlib import Path
+import time
 
-# -------------------------------------------------------------------------
-# [Setup] Project Root Path
-# 스크립트 실행 위치와 상관없이 src 모듈을 찾을 수 있도록 경로를 설정합니다.
-# -------------------------------------------------------------------------
+# 프로젝트 루트 경로 설정
 FILE_PATH = Path(__file__).resolve()
-PROJECT_DIR = FILE_PATH.parent.parent  # equity/
+PROJECT_DIR = FILE_PATH.parent.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from src.pipeline.platinum_processor import process_features
+# 이제 PlatinumProcessor 클래스가 존재하므로 정상적으로 import 됩니다.
+from src.pipeline.platinum_processor import PlatinumProcessor
 
 def main():
-    """
-    [Platinum Layer Initialization]
-    Gold Layer 데이터를 로드하여 'Feature Engineering'을 수행합니다.
-    - Dollar Bar 변환
-    - Fractional Differentiation (정상성 확보)
-    - Contrastive Learning Views 생성
-    - Universal Data Fusion (Macro, Fundamental 병합)
-    """
-    print(f"🚀 Initializing Platinum Layer Creation...")
-    print(f"📂 Project Root: {PROJECT_DIR}")
+    print("="*60)
+    print("🚀 PLATINUM LAYER GENERATION")
+    print("="*60)
     
-    # 멀티프로세싱 안전장치 (Windows/macOS 필수)
     multiprocessing.freeze_support()
+    start_time = time.time()
     
-    # Platinum Processor 실행
-    process_features()
+    # Processor 인스턴스 생성 및 실행
+    processor = PlatinumProcessor()
+    processor.process_features()
     
-    print("\n✨ Platinum Layer Creation Completed Successfully.")
+    end_time = time.time()
+    print(f"\n✨ All Done! Total Time: {end_time - start_time:.2f} sec")
 
 if __name__ == "__main__":
     main()
