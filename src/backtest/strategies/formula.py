@@ -38,32 +38,32 @@ class FormulaStrategy(Strategy):
                 data_context[k] = v
                 data_context[k.lower()] = v
 
-        # -------------------------------------------------------------
-        # [🕵️‍♂️ 긴급 점검] 데이터가 진짜 들어있나 확인
-        # -------------------------------------------------------------
-        print(f"   🔍 Checking Data Integrity for {len(market_data.tickers)} tickers, {len(market_data.dates)} days...")
+        # # -------------------------------------------------------------
+        # # [🕵️‍♂️ 긴급 점검] 데이터가 진짜 들어있나 확인
+        # # -------------------------------------------------------------
+        # print(f"   🔍 Checking Data Integrity for {len(market_data.tickers)} tickers, {len(market_data.dates)} days...")
         
-        # (1) FD_Close 확인
-        if 'FD_Close' in data_context:
-            fd = data_context['FD_Close']
-            valid_count = fd.notna().sum().sum()
-            total_cells = fd.shape[0] * fd.shape[1]
-            fill_rate = (valid_count / total_cells) * 100
-            print(f"      👉 'FD_Close' Fill Rate: {fill_rate:.2f}% (Valid: {valid_count} / Total: {total_cells})")
-            if fill_rate < 1.0:
-                print("      🚨 ERROR: FD_Close 데이터가 거의 비어있습니다! (feature 생성 실패 의심)")
-        else:
-            print("      🚨 ERROR: 'FD_Close' feature가 로드되지 않았습니다!")
+        # # (1) FD_Close 확인
+        # if 'FD_Close' in data_context:
+        #     fd = data_context['FD_Close']
+        #     valid_count = fd.notna().sum().sum()
+        #     total_cells = fd.shape[0] * fd.shape[1]
+        #     fill_rate = (valid_count / total_cells) * 100
+        #     print(f"      👉 'FD_Close' Fill Rate: {fill_rate:.2f}% (Valid: {valid_count} / Total: {total_cells})")
+        #     if fill_rate < 1.0:
+        #         print("      🚨 ERROR: FD_Close 데이터가 거의 비어있습니다! (feature 생성 실패 의심)")
+        # else:
+        #     print("      🚨 ERROR: 'FD_Close' feature가 로드되지 않았습니다!")
 
-        # (2) Universe 확인
-        if 'universe' in market_data.prices:
-            univ = market_data.prices['universe']
-            univ_ones = (univ == 1.0).sum().sum()
-            print(f"      👉 Universe (Top 500) Count sum: {univ_ones} (Should be roughly 500 * days)")
-            if univ_ones == 0:
-                print("      🚨 ERROR: 유니버스 마스크가 모두 0입니다! (거래대금 계산 실패 의심)")
-        else:
-            print("      ⚠️ Warning: 'universe' mask not found in prices.")
+        # # (2) Universe 확인
+        # if 'universe' in market_data.prices:
+        #     univ = market_data.prices['universe']
+        #     univ_ones = (univ == 1.0).sum().sum()
+        #     print(f"      👉 Universe (Top 500) Count sum: {univ_ones} (Should be roughly 500 * days)")
+        #     if univ_ones == 0:
+        #         print("      🚨 ERROR: 유니버스 마스크가 모두 0입니다! (거래대금 계산 실패 의심)")
+        # else:
+        #     print("      ⚠️ Warning: 'universe' mask not found in prices.")
 
         # 2. 수식 계산
         final_signal = pd.DataFrame(0.0, index=market_data.dates, columns=market_data.tickers)

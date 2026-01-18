@@ -5,7 +5,5 @@ strategy:
   class: FormulaStrategy
   params:
     expressions:
-      # - "if_else(ts_rank(ts_return(FD_Close, 21), 252) > 0.7, -ts_rank(ts_variance(FD_Close, 21), 252), 0)"
-      # - "ts_backfill(if_else(ts_rank(ts_skewness(FD_Close, 21), 126) > 0.9, 1, 0), 252)"
-      - "ret = ts_return(FD_Close, 1); if_else(ts_rank(ts_variance(ret, 21), 126) > 0.8, rank(ret), -1)"
-      # - "0"
+      # - "ret = ts_return(FD_Close, 1); alpha=if_else(ts_rank(ts_variance(ret, 21), 126) > 0.8, rank(ret), -1); alpha"
+      - "x=ts_backfill(ts2vec_manifold_0, 252); y=ts_backfill(ts2vec_manifold_1, 252); ts_corr(x, y, 126)"
