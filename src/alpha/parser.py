@@ -15,50 +15,87 @@ class AlphaParser:
         [Multi-Statement Support]
         세미콜론(;)으로 구분된 문장을 순차적으로 실행합니다.
         마지막 문장의 결과값을 반환합니다.
-        
-        예: "X = FD_Close * 2; ts_rank(X, 10)"
         """
         local_ctx = self.context.copy()
         local_ctx.update(data_dict)
         
-        # 1. 세미콜론으로 문장 분리
-        # (문자열 안의 세미콜론은 무시하는 등 복잡한 로직이 필요할 수 있으나, 여기선 단순 split 사용)
+        # 입력 방어 로직
+        if not isinstance(expression, str):
+            raise ValueError(f"수식은 문자열이어야 합니다. 입력값: {expression} ({type(expression)})")
+
         statements = [s.strip() for s in expression.split(';') if s.strip()]
         
         if not statements:
             raise ValueError("빈 수식입니다.")
 
         try:
-            # 2. 마지막 문장을 제외한 앞부분은 '실행(exec)' -> 변수 정의용
+            # 마지막 문장을 제외한 앞부분은 '실행(exec)' -> 변수 정의용
             for stmt in statements[:-1]:
                 exec(stmt, {"__builtins__": {}}, local_ctx)
                 
-            # 3. 마지막 문장은 '평가(eval)' -> 결과 반환용
+            # 마지막 문장은 '평가(eval)' -> 결과 반환용
             final_expr = statements[-1]
             return eval(final_expr, {"__builtins__": {}}, local_ctx)
             
         except Exception as e:
-            # 디버깅을 위해 어떤 부분에서 에러가 났는지 표시
             raise ValueError(f"수식 실행 오류:\n수식: {expression}\n원인: {e}")
 
     def extract_needed_features(self, expressions: list) -> list:
         """
         수식에서 필요한 피처(변수)를 추출합니다.
-        할당문 왼쪽의 변수(새로 정의된 변수)는 피처로 로딩하면 안 되지만,
-        로더가 '없는 파일'은 무시하므로 여기서는 단순하게 추출해도 괜찮습니다.
+        [Smart Filtering]
+        1. 예약어(함수명) 제외
+        2. 숫자 제외
+        3. 수식 내부에서 정의된 변수(x=...) 제외
         """
         needed = set()
+        
+        # 변수명 추출용 Regex
         token_pattern = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
+        # 대입문 감지용 Regex (예: "x =", "ret=")
+        assign_pattern = re.compile(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=')
 
+        if not expressions:
+            return []
+            
         for expr in expressions:
-            # 단순화를 위해 전체에서 단어 추출
-            tokens = token_pattern.findall(expr)
-            for token in tokens:
-                token_lower = token.lower()
-                if token_lower in self.reserved_keywords:
-                    continue
-                if token.isdigit():
-                    continue
-                needed.add(token)
+            if not isinstance(expr, str): continue
+            
+            # 세미콜론으로 문장 분리
+            statements = [s.strip() for s in expr.split(';') if s.strip()]
+            
+            # 이 수식 안에서 정의된 로컬 변수들을 추적하는 집합
+            local_vars = set()
+
+            for stmt in statements:
+                # 1. 이 문장에 등장하는 모든 토큰 추출
+                tokens = token_pattern.findall(stmt)
                 
-        return list(needed)
+                # 2. 이 문장이 변수 선언인지 확인 (LHS 추출)
+                match = assign_pattern.match(stmt)
+                defined_var = None
+                if match:
+                    defined_var = match.group(1) # "x = ..." 에서 "x" 추출
+                
+                # 3. 토큰 필터링
+                for token in tokens:
+                    # (A) 예약어이거나 숫자인가?
+                    if token.lower() in self.reserved_keywords or token.isdigit():
+                        continue
+                    
+                    # (B) 방금 정의된 변수(좌변)인가? -> 피처 아님
+                    if token == defined_var:
+                        continue
+                        
+                    # (C) 앞선 문장에서 이미 정의된 로컬 변수인가? -> 피처 아님
+                    if token in local_vars:
+                        continue
+                    
+                    # 위 조건을 모두 통과하면 외부 피처로 간주
+                    needed.add(token)
+                
+                # 4. 정의된 변수를 로컬 목록에 추가 (다음 문장부터는 피처로 오인하지 않도록)
+                if defined_var:
+                    local_vars.add(defined_var)
+                
+        return sorted(list(needed))

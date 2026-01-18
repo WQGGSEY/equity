@@ -1,135 +1,107 @@
 import sys
 import pandas as pd
+import numpy as np
 from pathlib import Path
-import importlib
 
 # 프로젝트 루트 경로 설정
-FILE_PATH = Path(__file__).resolve()
-PROJECT_DIR = FILE_PATH.parent.parent
-if str(PROJECT_DIR) not in sys.path:
-    sys.path.insert(0, str(PROJECT_DIR))
+file_path = Path(__file__).resolve()
+project_dir = file_path.parent.parent
+if str(project_dir) not in sys.path:
+    sys.path.insert(0, str(project_dir))
 
-from src.config import GOLD_DIR, ACTIVE_FEATURES
-from src.features.base import GlobalFeature
+# [수정됨] Loader 대신 MarketData 임포트
+from src.backtest.loader import MarketData
+from src.config import PLATINUM_DIR
 
-# 디버깅할 종목 (Gold에 존재하는 파일명으로 변경 가능)
-TARGET_TICKER = "AAPL" 
+def diagnose_crash():
+    print("🚑 [DIAGNOSIS] Starting investigation for 2022-03-10 Crash...")
 
-def load_feature_class(module_path, class_name):
+    # 1. MarketData 초기화 및 로드
+    print("   Loading Market Data...")
     try:
-        module = importlib.import_module(module_path)
-        return getattr(module, class_name)
+        # MarketData 인스턴스 생성
+        md = MarketData(platinum_dir=PLATINUM_DIR)
+        # 데이터 로드 (기본 가격 데이터 로드)
+        md.load_all()
     except Exception as e:
-        print(f"    [Error] Failed to load {class_name}: {e}")
-        return None
-
-def debug_process():
-    print(f"🔍 [DEBUG] Starting Debugging for: {TARGET_TICKER}")
+        print(f"❌ Failed to load MarketData: {e}")
+        return
     
-    # 1. Gold 파일 로드
-    gold_path = GOLD_DIR / f"{TARGET_TICKER}.parquet"
-    if not gold_path.exists():
-        print(f"❌ Gold file not found: {gold_path}")
-        # 아무 파일이나 하나 찾아서 대체
-        files = list(GOLD_DIR.glob("*.parquet"))
-        if files:
-            gold_path = files[0]
-            print(f"⚠️ Using alternative file: {gold_path.name}")
-        else:
-            print("❌ No Gold files found. Aborting.")
-            return
-
-    df = pd.read_parquet(gold_path)
-    df = df[~df.index.duplicated(keep='last')] # 중복 제거
+    # 2. 날짜 설정
+    date_prev = pd.Timestamp("2022-03-09")
+    date_crash = pd.Timestamp("2022-03-10")
     
-    print("\n" + "="*50)
-    print(f"✅ Step 1: Initial Load")
-    print(f"   - Shape: {df.shape}")
-    print(f"   - Columns: {list(df.columns)}")
-    print(f"   - Index Example: {df.index[:3].tolist()} ...")
-    print("="*50)
+    # 데이터에 해당 날짜가 있는지 확인 (md.prices['Close'] 사용)
+    if 'Close' not in md.prices:
+        print("❌ Critical Error: 'Close' price data not found in MarketData.")
+        return
 
-    # 2. Feature Loop 디버깅
-    final_df = df.copy()
-    final_df['ticker'] = gold_path.stem # Context Injection
+    close_prices = md.prices['Close']
+    
+    if date_crash not in close_prices.index:
+        print(f"❌ Error: {date_crash} not found in price data index.")
+        print(f"   Available range: {close_prices.index[0]} ~ {close_prices.index[-1]}")
+        return
 
-    for i, cfg in enumerate(ACTIVE_FEATURES):
-        cls_name = cfg['class']
-        print(f"\n▶️ [Feature {i+1}] Processing: {cls_name}")
+    # 3. 가격 데이터 비교
+    price_prev = close_prices.loc[date_prev]
+    price_crash = close_prices.loc[date_crash]
+    
+    # 두 날짜 모두 상장되어 있던 종목만 비교 (NaN 제외)
+    common_tickers = price_prev.dropna().index.intersection(price_crash.dropna().index)
+    
+    print(f"\n📊 Analyzing {len(common_tickers)} tickers active on both days...")
+    
+    if len(common_tickers) == 0:
+        print("⚠️ No common tickers found between the two dates. Something is very wrong.")
+        return
+
+    # 4. 수익률 계산
+    p_prev = price_prev[common_tickers]
+    p_curr = price_crash[common_tickers]
+    returns = (p_curr - p_prev) / p_prev
+    
+    # (A) -30% 이상 폭락한 종목 찾기
+    crashers = returns[returns < -0.30].sort_values()
+    
+    if not crashers.empty:
+        print(f"\n📉 [CRASH DETECTED] Top losers on {date_crash.date()}:")
+        print(crashers.head(20))
         
-        cls = load_feature_class(cfg['module'], cls_name)
-        if not cls:
-            print("   ❌ Class loading failed.")
-            continue
-            
+        worst = crashers.index[0]
+        print(f"\n   -> Worst Ticker: {worst}")
+        print(f"      3/09 Price: {p_prev[worst]}")
+        print(f"      3/10 Price: {p_curr[worst]}")
+    else:
+        print("\n✅ No individual stock crashed > 30%.")
+
+    # (B) 데이터 실종 (NaN) 탐지
+    # 전날엔 값이 있었는데, 이날 NaN이 된 종목 찾기
+    valid_prev_tickers = price_prev.dropna().index
+    valid_curr_tickers = price_crash.dropna().index
+    missing = valid_prev_tickers.difference(valid_curr_tickers)
+    
+    if not missing.empty:
+        print(f"\n👻 [MISSING DATA] {len(missing)} tickers became NaN on {date_crash.date()}:")
+        print(list(missing)[:20]) # 20개만 출력
+        
+        # 예시 확인
+        sample = missing[0]
+        print(f"   -> Example '{sample}':")
+        # 전후 2일치 데이터 출력
         try:
-            params = cfg.get('params', {})
-            instance = cls(**params)
-            
-            # [CHECKPOINT 1] Pre-compute state
-            print(f"   Before compute shape: {final_df.shape}")
-            
-            # Compute
-            # GlobalFeature 여부 확인
-            is_global = False
-            try:
-                if issubclass(cls, GlobalFeature): is_global = True
-            except: pass
+            window = close_prices.loc[date_prev - pd.Timedelta(days=2) : date_crash + pd.Timedelta(days=2), sample]
+            print(window)
+        except:
+            print("      (Could not fetch window data)")
+    else:
+        print("\n✅ No missing data found (No tickers disappeared).")
 
-            if is_global:
-                print("   (Global Feature Mode)")
-                res = instance.compute(final_df) # No Copy
-            else:
-                print("   (Local Feature Mode - Copying DF)")
-                res = instance.compute(final_df.copy()) # Copy
-            
-            # [CHECKPOINT 2] Result Inspection
-            if isinstance(res, pd.DataFrame):
-                print(f"   👉 Output Shape: {res.shape}")
-                print(f"   👉 Output Columns: {list(res.columns)}")
-                print(f"   👉 Output Index Match: {res.index.equals(final_df.index)}")
-                if not res.index.equals(final_df.index):
-                    print(f"      ⚠️ Index Mismatch Detected!")
-                    print(f"      Target(Daily): {final_df.index[:3].tolist()}")
-                    print(f"      Result: {res.index[:3].tolist()}")
-            
-            # Merge Logic Debug
-            prev_cols = set(final_df.columns)
-            
-            if isinstance(res, pd.Series):
-                final_df[res.name] = res
-            elif isinstance(res, pd.DataFrame) and not res.empty:
-                new_cols = res.columns.difference(final_df.columns)
-                if not new_cols.empty:
-                    print(f"   ➕ Merging columns: {list(new_cols)}")
-                    # concat 수행
-                    final_df = pd.concat([final_df, res[new_cols]], axis=1)
-                else:
-                    print("   ℹ️ No new columns to merge.")
-            
-            # [CHECKPOINT 3] Post-merge state
-            print(f"   ✅ After Merge Shape: {final_df.shape}")
-            print(f"   ✅ Current NaN Count: {final_df.isna().sum().sum()}")
-            
-        except Exception as e:
-            print(f"   ❌ Execution Error: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # 3. Final Dropna Check
-    print("\n" + "="*50)
-    print("🧹 Final Cleanup Phase")
-    print(f"   Before dropna shape: {final_df.shape}")
-    
-    # 어디서 NaN이 많은지 확인
-    nan_counts = final_df.isna().sum()
-    print("   [NaN Distribution]")
-    print(nan_counts[nan_counts > 0])
-    
-    final_df.dropna(inplace=True)
-    print(f"   After dropna shape: {final_df.shape}")
-    print(f"   Final Columns: {list(final_df.columns)}")
-    print("="*50)
+    # (C) 0원 데이터 탐지
+    zeros = price_crash[price_crash <= 0].index
+    if not zeros.empty:
+        print(f"\n0️⃣ [ZERO PRICE] {len(zeros)} tickers have 0.0 price:")
+        print(list(zeros))
 
 if __name__ == "__main__":
-    debug_process()
+    diagnose_crash()

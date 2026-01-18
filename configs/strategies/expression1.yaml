@@ -6,6 +6,5 @@ strategy:
   params:
     expressions:
       # - "ret = ts_return(FD_Close, 1); alpha=if_else(ts_rank(ts_variance(ret, 21), 126) > 0.8, rank(ret), -1); alpha"
-      # - "x=ts_backfill(ts2vec_manifold_0, 252); y=ts_backfill(ts2vec_manifold_1, 252); ts_corr(x, y, 126)"
-      - "x=ts_backfill(ts2vec_manifold_0, 252); y=ts_backfill(ts2vec_manifold_1, 252); group_neutralize(ts_corr(x, y, 126), grp_sector)"
-      
+      - "x=ts_backfill(ts2vec_manifold_1, 252); y=ts_backfill(ts2vec_manifold_2, 252); ts_corr(x, y, 126)"
+      # - "x=ts_backfill(ts2vec_manifold_0, 252); y=ts_backfill(ts2vec_manifold_1, 252); group_neutralize(ts_corr(x, y, 126), grp_liquidity)"
